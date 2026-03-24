@@ -1,0 +1,145 @@
+---
+title: "6. Graded assignment number 1 - population genetics and phylogeny"
+author: "EPFL - SV - BIO-463"
+date: 03/19/2026
+date-format: long
+format:
+  html:
+    embed-resources: true
+  pdf:
+    papersize: a4
+    fig-width: 6
+    fig-height: 4
+format-links: false
+---
+
+This problem set will be graded and count for **25% of your final grade**. You can discuss with TAs and with fellow students about the problem set, but in the end you should hand in a **personal** solution. Detected plagiarism will result in a reduction of your grade. 
+
+The expected language is R, as in all the class BIO-463. Below, some R functions and libraries are recommended. 
+
+Please hand in your solution, which should contain both the R code and the accompanying explanations and answers in the same file, in **two versions**: 
+- One should be your source file, in **.Rmd** or **.qmd** format; 
+- The other one should be the **html** file directly deriving from your source file.
+
+The two exercises are fully independent from each other. The second one is longer and will be worth about twice more in terms of points.
+
+Some questions are broken down into itemized sub-questions. The goal is to help you address all points. Some sub-questions only require a short answer, but please make sure you answer each of them. 
+
+Please hand in your solution on **Moodle** by **Friday, March 27 at 11:59pm**. 
+
+
+## Exercise 1 - Molecular Evolution of SARS-CoV-2
+
+Here, we will analyze the molecular evolution of SARS-CoV-2 using the  *ape: Analyses of Phylogenetics and Evolution* and the *adegenet* packages.
+The data file "spike_seq.fasta" contains nucleotide sequences of the spike (S) gene from SARS-CoV-2 genomes, sampled at various points during the COVID-19 pandemic. The first sequence is the Wuhan-Hu-1 reference sequence. The file "spike_annot.csv" contains annotations for all sequences, including the collection date and the Pango lineage assigned to each sequence.
+
+1. 
+- Load the sequences using *read.dna*. 
+- Load the annotations using *read.csv* and inspect them, e.g. by displaying the first few rows. 
+
+2. In this question, we will build a phylogenetic tree of these SARS-CoV-2 spike sequences:
+- Calculate all pairwise distances between sequences using *dist.dna* under the Jukes-Cantor model.
+- Infer a neighbor-joining (NJ) tree from these distances using *bionj*.
+- Use the first sequence (reference) to root the tree as an outgroup using *root*, then apply *ladderize* to the resulting tree.
+- Plot the tree using *plot*, coloring each tip by the date of collection and annotating each leaf with the date of collection (note: use the full date of collection, not just the year). 
+
+*Clues:* 
+You can use *as.numeric* to convert dates to numbers, and employ the fact that the date format is "%d.%m.%y".
+For colors, you can use *colorRampPalette*.
+For visualization, you can tune figure height and width, e.g. by including the following two lines at the beginning of your code: #| fig-height: 20 and #| fig-width: 12 (if necessary, for your own visualization you can render the plot or save it as a pdf, but please do not include these extra files in your submission).
+
+3. Comment on the tree:
+- What general trend do you observe in how sequences are arranged by collection period?
+- Apart from 8 early sequences that resemble the reference one, we notice that there are 3 main clusters of sequences. Each corresponds to one variant among Alpha, Delta and Omicron. Given that the order of appearance of these variants was first Alpha, then Delta and last Omicron, give the identifier of the earliest Alpha sequence present in the dataset, of the earliest Delta sequence and of the earliest Omicron sequence in the dataset. [For example, the identifier of the reference sequence is NC045512.]
+- How are the Alpha and Delta clusters positioned relative to each other and relative to the 8 early sequences (+ the root) on the tree? What does this tell us about their evolutionary relationship?
+- Is the Omicron cluster closer to the Alpha one or to the Delta one? Comment on this observation.
+- The sequence with identifier OQ381032 is actually a recombinant sequence, with a chimeric genome, which occurred to to a patient being co-infected by 2 strains. Based on the tree, what do you hypothesize for the part of that genome that codes for the spike protein?
+
+*Note:* No need to provide code in this question, which is about tree interpretation.
+
+4. We will now examine how molecular distances from the reference sequence accumulate over time.
+- For each sequence (excluding the reference), calculate its Jukes-Cantor distance to the reference sequence using *dist.dna*.
+- Plot these distances as a function of collection date.
+- Comment: What is the overall trend? How does this data deviate from it? Roughly what fraction of the spike gene has diverged from the reference sequence by the end of the sampling period?
+
+
+## Exercise 2 - Simulating experimental evolution with serial passage and extinction-reseeding events
+
+Let us consider an experiment where bacteria are growing in a multi-well plate comprising $D$ wells. Bacteria grow within each well for a day, and reach saturation (stationary phase), where each of them has a (large) size $N$. Then, at the end of each day (and of each growth phase), serial dilutions are performed separately in each well, in such a way that few bacteria remain in each of them. We will denote by $B$ the average bottleneck size per well, which is the average number of bacteria remaining after serial dilution in each well. 
+
+### Part 1: faster-growing mutants in a single well
+
+In this part, we will consider that there are bacteria of two types, wild-types with fitness 1 and mutants with fitness $1+s$, with $s>0$. These fitnesses represent deterministic exponential growth rates. 
+
+1. In this question, we will focus on the growth phase within one single well. For simplicity, instead of explicitly modeling logistic growth, we will assume that it is equivalent to exponential growth lasting for an effective time $t^*$, which we will take equal to 10 (in the unit where wild-type fitness is 1).
+- Write the mutant fraction $x'$ after growth as a function of the mutant fraction $x$ before growth and of the parameters of the system. 
+- Assuming that $s=0.1$ and $x=0.1$, taking $t^*=10$, compute the value of $x'$. Same question if all values are the same except that $s=0.001$. 
+- Comment on the results by comparing the two cases.
+
+2. In this question, we will focus on a given dilution step within one single well, and we will assume for simplicity that there are exactly $B$ individuals in the well at the bottleneck. Let us call $k$ the number of mutants that are sampled to form the next bottleneck. We still denote by $x'$ the mutant fraction after growth.
+- What is the name of the probability distribution that $k$ follows? 
+- Write the formula for the probability $P(k)$ to obtain a given value of $k$. Note: here, if possible, we recommend using LaTeX for presentation quality.
+- What R function can you use to simulate this sampling? Note: no need to perform sampling for now.
+- Is it reasonable to consider that there are exactly $B$ individuals in each well at the bottleneck if serial dilution is performed experimentally so that the average size of a bottleneck is $B=3$? Justify your answer.
+
+3. In this question, we will still focus on a given dilution step within one single well, but we will no longer assume that there are exactly $B$ individuals in the well at the bottleneck. We will consider that mutant individuals are sampled using a binomial law with parameters $N$ and $Bx'/N$, and that wild-type individuals are sampled using a binomial law with parameters $N$ and $B(1-x')/N$. Recall that $N$ is the (large) size of the population in the well after growth. [For example, later, we will assume that $N=10^5$.] 
+- In this model, what is the average size of the population in the well after the dilution event?
+- What is the probability that the population in the well gets extinct at the dilution event considered, i.e. that 0 mutant and 0 wild-type are sampled? How does it simplify in the large-$N$ limit?
+- Does this probability depend on $s$ in the large-$N$ limit? Comment: does a fitter mutant make extinction of the population within the well different?
+- Compute the value of the extinction probability (in the large-$N$ limit) for all integer values of $B$ ranging from 1 to 10. Comment: in what range of $B$ can extinction be neglected? 
+- If the population gets extinct, assuming that the well is isolated (no exchanges between different wells), what happens next to that well?
+
+4. In this question, we will sample the number $k$ of mutants and the number $l$ of wild-types that exist at the next bottleneck, under the serial passage model described in question 3 (for one single well), assuming that $s=0.1$, $B=3$, $N=10^5$, $x=1/3$, and $t^*=10$. Perform 1000 replicates.
+- Sample $N=10000$ different values of $k$ and of $l$. In each case, also calculate $m=k+l$.
+- Compute the mean and the variance of $k$, of $l$, and of $m$, as well as of the new mutant fraction $k/m$ (please consider that it is 0 if $m=0$).
+- Plot the histogram of the values obtained for $k$, $l$ and $m$ (one histogram for each, i.e. three histograms total).
+
+5. In this question, we will simulate the serial passage model (for one single well). We will neglect new mutations that may happen during the process. Thus, the only mutants are those present initially. 
+- Simulate the serial passage model described above with $s=0.1$, $B=5$, $N=10^5$, $x=1/5$, and $t^*=10$, for 500 bottlenecks. 
+- On a single plot, plot (1) the fraction of replicates where the whole population is extinct, (2) the fraction of replicates where only mutants are extinct and (3) the fraction of replicates where only wild-types are extinct, versus the number of bottlenecks. 
+- Based on your results, how does the (average) mutant fixation or extinction time compare to the (average) total population extinction time? Justify your answer.
+
+
+### Part 2: sticky mutants in a single well
+
+In this part, we will consider that there are bacteria of two types, wild-types with fitness 1 and mutants with fitness 1 (i.e. neutral from the point of view of fitnesses representing deterministic exponential growth rates) but that are more likely to be sampled in a dilution phase because they are sticky (you can imagine that they stick to the edges of the well, e.g. by forming a biofilm). 
+
+1. In this case, does the mutant fraction $x$ vary during growth? Justify your answer.
+
+2. In this question, we will focus on a given dilution step within one single well. We will consider that mutant individuals are sampled using a binomial law with parameters $N$ and $Bx(1+\xi)/N$, and that wild-type individuals are sampled using a binomial law with parameters $N$ and $B(1-x)/N$. Here, $\xi$ is a parameter that encodes mutant stickiness, and $B$ is related to bottleneck size. As before, $x$ is the initial mutant fraction before growth, $N$ is the (large) size of the population in the well after growth. 
+- What is the average size of the population in the well after the dilution event? Comment on the impact of $x$ and $\xi$ on this size.
+- What is the probability that the population in the well gets extinct at the dilution event considered, i.e. that 0 mutant and 0 wild-type are sampled? How does it simplify in the large-$N$ limit? 
+- Comment on the impact of $x$ and $\xi$ on this extinction probability in the large-$N$ limit. How does this compare to the case studied in part 1 where mutants were fitter and not stickier?
+- Taking $x=1$ and $\xi=0.3$, compute the value of the extinction probability (in the large-$N$ limit) for all integer values of $B$ ranging from 1 to 10. Also report the values already calculated in part 1. Comment: how does this compare to the results obtained in part 1?
+
+3. In this question, we will sample the number $k$ of mutants and the number $l$ of wild-types that exist at the next bottleneck, under the serial passage model described in question 2 with sticky mutants (for one single well), assuming that $\xi=0.3$, $B=3$, $N=10^5$, $x=1/3$. 
+- Sample $N=10000$ different values of $k$ and of $l$. In each case, also calculate $m=k+l$. Compute the mean and the variance of $k$, of $l$, and of $m$, as well as of the new mutant fraction $k/m$ (please consider that it is 0 if $m=0$).
+- Compare the results obtained for the average of $m$ and of the new mutant fraction $k/m$ between this part and part 1. Comment: what is the impact of stickiness? Of growth time?
+
+4. In this question, we will simulate the serial passage model (for one single well) with sticky mutants. As before, we will neglect new mutations that may happen during the process. Thus, the only mutants are those present initially. 
+- Simulate the serial passage model described above with $\xi=0.3$, $B=5$, $N=10^5$, $x=1/5$, for 500 bottlenecks. Perform 1000 replicates. On a single plot, plot (1) the fraction of replicates where the whole population is extinct, (2) the fraction of replicates where only mutants are extinct and (3) the fraction of replicates where only wild-types are extinct, versus the number of bottlenecks. 
+- Comment: what are the key differences with the plots obtained in Part 1?
+
+
+### Part 3: multi-well dynamics
+
+Let us now consider a system of $D$ wells which all undergo synchronous cycles of growth and dilution, as described above. There is no exchange between the wells, except from a reseeding upon the extinction of a well. More precisely, when a well goes extinct, the experimentalist reseeds it with one bacteria that is randomly chosen from the pool of all bacteria discarded across all $D$ wells during the current dilution step. Because each well has the same size $N$ after a growth phase, and assuming that each well is either fully wild-type or fully mutant for simplicity, this means that the reseeding bacteria has a probability $i/D$ to be mutant and $(D-i)/D$ to be wild-type, where $i$ represents the number of mutant demes at the previous dilution step (before this new extinction). We are going to study the evolution of $i$ in time.
+
+1. 
+- Based on the previous parts, why is it reasonable to assume that each well is either fully wild-type or fully mutant from the point of view of the time evolution of $i$?
+- Neglecting any new mutations, what needs to happen for $i$ to increase by 1?
+- Does mutant fitness (in the sense of the exponential growth rate) impact this process? Justify your answer.
+
+2. Here, we consider mutants that may grow faster, but do not have any stickiness difference with wild-types. Assume that we start with one entire well of mutants, and $D-1$ entire wells of wild-types. 
+- Simulate the dynamics of the multi-well population by performing simultaneous binomial sampling in each well, and instantaneous re-seeding (as described above) whenever a well goes extinct, using $D=5$ and $B=3$, and a number of dilution steps equal to 500 (recall that one step impacts all wells). Plot 20 trajectories showing $i$ versus the number of serial dilution steps performed.
+- Run 1000 replicates, and compute the fraction of replicates where all wells are mutant at the end. 
+- Comment: How can this quantity be interpreted? How can its value be rationalized?
+
+3. What changes in the process if the mutants are more sticky than the wild-types? Does this result in an advantage for the mutant or for the wild-type?
+
+4. Perform the same steps as in question 2, but assuming that mutants have fitness 1, but are more sticky than wild-types, and modeling stickiness as in part 2. Use $\xi=0.3$, $D=5$ and $B=3$. Comment, as in question 2.
+
+5. Finally, let us assume that we start from one mutant (out of 3 bacteria total) in one of the wells, while all other wells are fully wild-type. 
+- Simulate the situation in the case of fitter mutants (as in part 1), assuming that $s=0.1$, $D=5$, $B=3$, $N=10^5$, $x=1/3$, and $t^*=10$. Run 1000 replicates for 500 steps each, and compute the fraction of replicates where all wells are mutant at the end.
+- Simulate the situation in the case of stickier mutants (as in part 2), assuming that $\xi=0.3$, $D=5$, $B=3$, $N=10^5$, $x=1/3$. Run 1000 replicates for 500 steps each, and compute the fraction of replicates where all wells are mutant at the end.
+- Compare the two results and comment.

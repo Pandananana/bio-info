@@ -1,0 +1,13 @@
+*.DS_Store
+*.fasta
+*.csv
+
+# renv
+renv/library/
+renv/staging/
+renv/sandbox/
+renv/cellar/
+renv/local/
+renv/lock/
+renv/python/
+renv/cache/
