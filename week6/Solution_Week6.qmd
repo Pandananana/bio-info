@@ -1,0 +1,753 @@
+---
+title: "6. Graded assignment number 1 - population genetics and phylogeny"
+author: "BIO-463"
+date: 03/19/2026
+date-format: long
+format:
+  html:
+    embed-resources: true
+format-links: false
+---
+
+```{r setup, include=FALSE}
+library(ape)
+library(adegenet)
+set.seed(42)
+```
+
+## Exercise 1 - Molecular Evolution of SARS-CoV-2
+
+### Question 1
+
+```{r}
+# Load sequences
+seqs <- read.dna("spike_seq.fasta", format = "fasta")
+
+# Load annotations
+annot <- read.csv("spike_annot.csv")
+head(annot)
+```
+
+```{r}
+# Parse dates
+annot$Date <- as.Date(annot$Collection_Date, format = "%d.%m.%y")
+annot$DateNum <- as.numeric(annot$Date)
+```
+
+The dataset contains `r nrow(annot)` sequences with accession, geographic location, and collection date.
+
+### Question 2
+
+```{r}
+# Helper: extract short accession from FASTA names to match CSV
+get_accession <- function(names) {
+  acc <- sub("[.:].*", "", names)   # take everything before first '.' or ':'
+  acc <- gsub("_", "", acc)         # remove underscores (e.g. NC_045512 -> NC045512)
+  acc
+}
+```
+
+```{r}
+#| fig-height: 20
+#| fig-width: 12
+
+# Compute pairwise distances (Jukes-Cantor)
+d <- dist.dna(seqs, model = "JC69")
+
+# Build NJ tree
+tree <- bionj(d)
+
+# Root with reference sequence (first sequence)
+ref_tip <- tree$tip.label[grep("NC_045512", tree$tip.label)]
+tree_rooted <- root(tree, outgroup = ref_tip, resolve.root = TRUE)
+tree_rooted <- ladderize(tree_rooted)
+
+# Match tip labels to annotations
+tip_acc <- get_accession(tree_rooted$tip.label)
+match_idx <- match(tip_acc, annot$Accession)
+tip_dates <- annot$Date[match_idx]
+tip_date_num <- as.numeric(tip_dates)
+
+# Color by date
+date_range <- range(tip_date_num, na.rm = TRUE)
+pal <- colorRampPalette(c("blue", "cyan", "green", "yellow", "orange", "red"))
+ncol <- 100
+cols <- pal(ncol)
+date_scaled <- (tip_date_num - date_range[1]) / diff(date_range)
+tip_cols <- cols[pmin(pmax(round(date_scaled * (ncol - 1)) + 1, 1), ncol)]
+
+# Format date labels
+date_labels <- format(tip_dates, "%d.%m.%Y")
+
+# Plot
+plot(tree_rooted, show.tip.label = FALSE, main = "NJ Tree of SARS-CoV-2 Spike Sequences")
+tiplabels(date_labels, cex = 0.6, col = tip_cols, frame = "none", adj = -0.1)
+tiplabels(pch = 19, col = tip_cols, cex = 1.2)
+
+# Legend
+legend_dates <- seq(min(tip_dates, na.rm = TRUE), max(tip_dates, na.rm = TRUE), length.out = 5)
+legend("bottomleft",
+       legend = format(legend_dates, "%b %Y"),
+       col = pal(5), pch = 19, title = "Collection Date", cex = 0.8)
+```
+
+### Question 3
+
+**General trend:** Sequences are broadly arranged chronologically on the tree. Earlier sequences (2020 and early 2021) cluster near the root (the Wuhan-Hu-1 reference), while more recent sequences (2022) are at the tips of longer branches, reflecting the accumulation of mutations over time.
+
+**Identifying the three main clusters and their earliest sequences:**
+
+Apart from the 8 early sequences that resemble the reference (with near-zero JC distance), the tree shows 3 main clusters:
+
+- **Alpha cluster** (7 sequences, early-to-mid 2021): MZ404633, OL405069, MZ157261, OL405059, OL405061, MZ815440, ON965806. The **earliest Alpha sequence** is **MZ404633** (collected 31.03.2021).
+
+- **Delta cluster** (12 sequences, mid 2021 to early 2022): OP168680, OP168699, LC793402, LC793403, OQ608099, OQ381013, OL629616, OK179081, OQ381002, OQ381004, OQ381017, PP956952. The **earliest Delta sequence** is **OP168680** (collected 12.07.2021).
+
+- **Omicron cluster** (12 sequences, early 2022 onwards): LC793408, LC793410, LC793412, LC793460, ON644367, ON644382, ON626395, LC793413, OQ381032, LC793465, OQ931800, OQ931808. The **earliest Omicron sequence** is **ON644367** (collected 05.01.2022).
+
+**Alpha and Delta relative positioning:** On the tree, Delta branches off closer to the early/basal sequences (more basal position), while Alpha branches off further from the root. Both evolved independently from the ancestral lineage — Delta did not evolve from Alpha and Alpha did not evolve from Delta. They are on separate branches, indicating independent divergence from the early SARS-CoV-2 lineage through distinct sets of mutations in the spike gene.
+
+**Omicron relative position:** Omicron is positioned as a sister clade to Alpha on the tree, making it closer to Alpha than to Delta. However, the Omicron branch is much longer than any other, reflecting its large number of spike mutations. This proximity to Alpha (rather than to Delta, which was the dominant variant just before Omicron's emergence) is notable and consistent with the hypothesis that Omicron did not evolve directly from Delta but rather diverged from an earlier lineage (possibly evolving in an immunocompromised host or an unsampled reservoir) and shares some ancestral spike mutations with Alpha.
+
+**OQ381032 (recombinant):** OQ381032 clusters within the Omicron clade (specifically in the BA.2/BA.5-like sub-cluster, close to ON626395 and LC793413). Since this is a recombinant sequence from co-infection by 2 strains, and the tree is based solely on the spike gene, we can hypothesize that the **spike gene portion of this chimeric genome derives from an Omicron variant**. The other parts of the genome (not represented in this analysis) likely come from a different variant.
+
+### Question 4
+
+```{r}
+#| fig-height: 6
+#| fig-width: 8
+
+# Distances from reference to all other sequences
+d_mat <- as.matrix(d)
+ref_name <- rownames(d_mat)[1]
+ref_dists <- d_mat[ref_name, -1]  # exclude self
+
+# Match to annotations
+acc_short <- get_accession(names(ref_dists))
+dist_df <- data.frame(
+  Accession = acc_short,
+  Distance = ref_dists,
+  stringsAsFactors = FALSE
+)
+dist_df <- merge(dist_df, annot, by = "Accession")
+
+# Plot distance vs date
+plot(dist_df$Date, dist_df$Distance,
+     xlab = "Collection Date", ylab = "JC Distance to Reference",
+     main = "Molecular Distance from Wuhan-Hu-1 Reference over Time",
+     pch = 19, col = "steelblue", cex = 1.2)
+
+# Add a trend line
+fit <- lm(Distance ~ as.numeric(Date), data = dist_df)
+abline(fit, col = "red", lwd = 2, lty = 2)
+```
+
+**Overall trend:** There is a clear positive trend: molecular distance from the reference increases over time, consistent with a molecular clock — the virus accumulates mutations roughly linearly with time.
+
+**Deviations:** The data does not fall on a straight line. There are notable jumps, particularly the large increase in distance associated with the emergence of Omicron (late 2021 / early 2022), which shows much higher spike divergence than expected from the linear trend. This is consistent with the hypothesis that Omicron underwent accelerated evolution (e.g., in a chronically infected patient). Alpha and Delta show intermediate levels of divergence.
+
+**Fraction diverged:** By the end of the sampling period (late 2022), the JC distance from the reference reaches approximately 0.008–0.009, meaning roughly **0.8–0.9% of the spike gene nucleotides** have diverged from the original Wuhan-Hu-1 reference sequence.
+
+
+## Exercise 2 - Simulating experimental evolution with serial passage and extinction-reseeding events
+
+### Part 1: faster-growing mutants in a single well
+
+#### Question 1
+
+During exponential growth for an effective time $t^*$, wild-types grow by factor $e^{t^*}$ and mutants by $e^{(1+s)t^*}$.
+
+Starting from a mutant fraction $x$, after growth:
+
+$$x' = \frac{x \, e^{(1+s)t^*}}{x \, e^{(1+s)t^*} + (1-x) \, e^{t^*}} = \frac{x \, e^{s \, t^*}}{x \, e^{s \, t^*} + (1-x)}$$
+
+```{r}
+t_star <- 10
+
+# Case 1: s = 0.1, x = 0.1
+s1 <- 0.1; x <- 0.1
+x_prime_1 <- x * exp(s1 * t_star) / (x * exp(s1 * t_star) + (1 - x))
+cat("s = 0.1, x = 0.1: x' =", x_prime_1, "\n")
+
+# Case 2: s = 0.001, x = 0.1
+s2 <- 0.001
+x_prime_2 <- x * exp(s2 * t_star) / (x * exp(s2 * t_star) + (1 - x))
+cat("s = 0.001, x = 0.1: x' =", x_prime_2, "\n")
+```
+
+**Comment:** With $s = 0.1$, the mutant fraction more than doubles from 0.1 to about `r round(x_prime_1, 3)` after a single growth phase — a substantial increase. With $s = 0.001$, the mutant fraction barely changes (from 0.1 to about `r round(x_prime_2, 4)`). This is because the selective advantage is amplified exponentially by the growth time: $e^{s \cdot t^*}$ is $e^1 \approx 2.72$ for $s=0.1$ but only $e^{0.01} \approx 1.01$ for $s=0.001$. Over multiple growth cycles, the $s=0.1$ mutant would rapidly fix, while the $s=0.001$ mutant would take much longer and be more subject to drift.
+
+#### Question 2
+
+The number $k$ of mutants sampled at the bottleneck follows a **Binomial distribution** with parameters $B$ (bottleneck size) and $x'$ (mutant fraction after growth):
+
+$$P(k) = \binom{B}{k} (x')^k (1 - x')^{B-k}, \quad k = 0, 1, \ldots, B$$
+
+In R, the function `rbinom(n, size = B, prob = x_prime)` can be used to simulate this sampling.
+
+**Is $B = 3$ exactly realistic?** No. In practice, serial dilution involves each bacterium being independently retained with a small probability, so the total number of bacteria remaining follows approximately a **Poisson distribution** with mean $B$. When $B = 3$, the Poisson variance also equals 3, so the actual bottleneck size fluctuates considerably (values of 0, 1, 2, ... all have non-negligible probability). In particular, there is a non-negligible extinction probability $P(0) = e^{-3} \approx 0.05$. Therefore, it is **not reasonable** to assume exactly $B = 3$ bacteria remain in each well; a Poisson model for the total count would be more appropriate.
+
+#### Question 3
+
+In this model, mutants are sampled as $k \sim \text{Binomial}(N, Bx'/N)$ and wild-types as $l \sim \text{Binomial}(N, B(1-x')/N)$, independently.
+
+**Average population size after dilution:**
+
+$$\mathbb{E}[k + l] = N \cdot \frac{Bx'}{N} + N \cdot \frac{B(1-x')}{N} = Bx' + B(1-x') = B$$
+
+The average size is $B$.
+
+**Probability of extinction** (0 mutants and 0 wild-types sampled):
+
+$$P(\text{extinct}) = \left(1 - \frac{Bx'}{N}\right)^N \left(1 - \frac{B(1-x')}{N}\right)^N$$
+
+In the large-$N$ limit, $(1 - a/N)^N \to e^{-a}$, so:
+
+$$P(\text{extinct}) \xrightarrow{N \to \infty} e^{-Bx'} \cdot e^{-B(1-x')} = e^{-B}$$
+
+**Dependence on $s$:** In the large-$N$ limit, the extinction probability is $e^{-B}$, which does **not** depend on $s$ (or on $x'$). A fitter mutant does not change the probability of total well extinction. This makes sense: extinction depends only on the total bottleneck size $B$, not on which type is fitter.
+
+**Extinction probability for $B = 1, \ldots, 10$:**
+
+```{r}
+B_vals <- 1:10
+ext_prob <- exp(-B_vals)
+names(ext_prob) <- paste("B =", B_vals)
+print(round(ext_prob, 6))
+```
+
+For $B \geq 5$, the extinction probability is less than 1%, so extinction can be neglected. For $B = 3$, it is about 5% — still non-negligible. For $B = 1$ or $B = 2$, extinction is quite likely (37% and 13.5%, respectively).
+
+**If the population goes extinct** and the well is isolated (no exchanges), the well remains empty permanently — no new bacteria can appear.
+
+#### Question 4
+
+```{r}
+s <- 0.1; B <- 3; N_pop <- 1e5; x <- 1/3; t_star <- 10
+N_samples <- 10000
+
+# Growth phase
+x_prime <- x * exp(s * t_star) / (x * exp(s * t_star) + (1 - x))
+cat("x' after growth =", x_prime, "\n")
+
+# Sample mutants and wild-types
+k <- rbinom(N_samples, size = N_pop, prob = B * x_prime / N_pop)
+l <- rbinom(N_samples, size = N_pop, prob = B * (1 - x_prime) / N_pop)
+m <- k + l
+
+# New mutant fraction (0 if m = 0)
+new_x <- ifelse(m == 0, 0, k / m)
+
+# Statistics
+cat("\nMean k:", mean(k), "  Var k:", var(k), "\n")
+cat("Mean l:", mean(l), "  Var l:", var(l), "\n")
+cat("Mean m:", mean(m), "  Var m:", var(m), "\n")
+cat("Mean k/m:", mean(new_x), "  Var k/m:", var(new_x), "\n")
+```
+
+```{r}
+#| fig-height: 10
+#| fig-width: 8
+par(mfrow = c(3, 1))
+hist(k, breaks = 30, main = "Histogram of k (mutants sampled)", xlab = "k", col = "coral")
+hist(l, breaks = 30, main = "Histogram of l (wild-types sampled)", xlab = "l", col = "skyblue")
+hist(m, breaks = 30, main = "Histogram of m = k + l (total sampled)", xlab = "m", col = "plum")
+```
+
+#### Question 5
+
+```{r}
+#| fig-height: 7
+#| fig-width: 9
+
+s <- 0.1; B <- 5; N_pop <- 1e5; x_init <- 1/5; t_star <- 10
+n_bottlenecks <- 500
+n_replicates <- 1000
+
+# Initialize: 1 mutant out of 5 total in each replicate
+k_all <- rep(round(x_init * B), n_replicates)
+l_all <- rep(B - round(x_init * B), n_replicates)
+
+frac_all_extinct <- numeric(n_bottlenecks)
+frac_mut_extinct <- numeric(n_bottlenecks)
+frac_wt_extinct <- numeric(n_bottlenecks)
+
+for (step in 1:n_bottlenecks) {
+  m_total <- k_all + l_all
+  x_current <- ifelse(m_total > 0, k_all / m_total, 0)
+
+  # Growth phase: mutant fraction changes
+  x_after <- ifelse(m_total > 0,
+    x_current * exp(s * t_star) / (x_current * exp(s * t_star) + (1 - x_current)),
+    0)
+
+  # Dilution phase (binomial sampling)
+  k_new <- rbinom(n_replicates, size = N_pop, prob = B * x_after / N_pop)
+  l_new <- rbinom(n_replicates, size = N_pop, prob = B * (1 - x_after) / N_pop)
+
+  # If already extinct, stay extinct
+  k_new[m_total == 0] <- 0
+  l_new[m_total == 0] <- 0
+
+  k_all <- k_new
+  l_all <- l_new
+
+  frac_all_extinct[step] <- mean(k_all == 0 & l_all == 0)
+  frac_mut_extinct[step] <- mean(k_all == 0 & l_all > 0)
+  frac_wt_extinct[step] <- mean(k_all > 0 & l_all == 0)
+}
+
+plot(1:n_bottlenecks, frac_all_extinct, type = "l", col = "black", lwd = 2,
+     xlab = "Number of bottlenecks", ylab = "Fraction of replicates",
+     main = "Part 1, Q5: Serial passage (s=0.1, B=5)",
+     ylim = c(0, 1))
+lines(1:n_bottlenecks, frac_mut_extinct, col = "blue", lwd = 2)
+lines(1:n_bottlenecks, frac_wt_extinct, col = "red", lwd = 2)
+legend("right", legend = c("All extinct", "Only mutants extinct", "Only WT extinct"),
+       col = c("black", "blue", "red"), lwd = 2, cex = 0.8)
+```
+
+**Comment:** Mutant fixation (= wild-type extinction, red) and mutant loss (blue) resolve within the first ~50–100 bottlenecks, while total population extinction (black) accumulates much more slowly over many hundreds of steps. This means the **mutant fixation/extinction time is much shorter than the total population extinction time**. This is because fixation or loss of one type is driven by genetic drift at bottlenecks (fast when $B$ is small), whereas total extinction requires the rare event that all individuals are lost ($P \approx e^{-B} \approx 0.007$ per step for $B=5$). The fitter mutant ($s=0.1$) fixes more often than it goes extinct, reflecting its growth advantage.
+
+
+### Part 2: sticky mutants in a single well
+
+#### Question 1
+
+Since the mutants have the same fitness as wild-types (both have growth rate 1), both types grow at the same exponential rate. Therefore, the mutant fraction $x$ **does not change during growth** — it remains equal to $x$ throughout the growth phase. Stickiness only affects sampling during dilution, not growth.
+
+#### Question 2
+
+With the sticky-mutant model, the average population size after dilution is:
+
+$$\mathbb{E}[k + l] = N \cdot \frac{Bx(1+\xi)}{N} + N \cdot \frac{B(1-x)}{N} = Bx(1+\xi) + B(1-x) = B(1 + x\xi)$$
+
+The average size is $B(1 + x\xi)$, which **increases** with $x$ (mutant fraction) and $\xi$ (stickiness). When there are more sticky mutants, more bacteria are retained during dilution.
+
+**Extinction probability:**
+
+$$P(\text{extinct}) = \left(1 - \frac{Bx(1+\xi)}{N}\right)^N \left(1 - \frac{B(1-x)}{N}\right)^N \xrightarrow{N \to \infty} e^{-Bx(1+\xi)} \cdot e^{-B(1-x)} = e^{-B(1 + x\xi)}$$
+
+**Impact of $x$ and $\xi$:** The extinction probability $e^{-B(1+x\xi)}$ **decreases** as $x$ or $\xi$ increase. More sticky mutants means more bacteria are retained, making extinction less likely. This contrasts with Part 1, where the extinction probability was $e^{-B}$ regardless of $s$ or $x$. **Stickiness directly affects population survival** (because it changes the effective bottleneck size), whereas **fitness advantage does not** (it only changes the composition, not the total expected number retained).
+
+**Extinction probability for $x = 1$, $\xi = 0.3$, $B = 1, \ldots, 10$:**
+
+```{r}
+B_vals <- 1:10
+xi <- 0.3; x_sticky <- 1
+ext_prob_sticky <- exp(-B_vals * (1 + x_sticky * xi))
+ext_prob_neutral <- exp(-B_vals)  # Part 1 values
+
+result <- data.frame(
+  B = B_vals,
+  P_ext_Part1 = round(ext_prob_neutral, 6),
+  P_ext_Part2_sticky = round(ext_prob_sticky, 6)
+)
+print(result)
+```
+
+The extinction probability with sticky mutants ($x=1$, $\xi=0.3$) is **lower** than in Part 1 for the same $B$. The effective bottleneck is $B(1+\xi) = 1.3B$, so more bacteria survive. For example, at $B = 3$, the extinction probability drops from about 5% to about 2%.
+
+#### Question 3
+
+```{r}
+xi <- 0.3; B <- 3; N_pop <- 1e5; x <- 1/3
+N_samples <- 10000
+
+# No growth phase change (fitness is equal)
+x_after_growth <- x
+
+# Sample mutants and wild-types (sticky model)
+k <- rbinom(N_samples, size = N_pop, prob = B * x * (1 + xi) / N_pop)
+l <- rbinom(N_samples, size = N_pop, prob = B * (1 - x) / N_pop)
+m <- k + l
+
+new_x <- ifelse(m == 0, 0, k / m)
+
+cat("Mean k:", mean(k), "  Var k:", var(k), "\n")
+cat("Mean l:", mean(l), "  Var l:", var(l), "\n")
+cat("Mean m:", mean(m), "  Var m:", var(m), "\n")
+cat("Mean k/m:", mean(new_x), "  Var k/m:", var(new_x), "\n")
+```
+
+**Comparison with Part 1:**
+
+In Part 1 (fitness advantage, $s=0.1$, $B=3$, $x=1/3$, $t^*=10$):
+
+- The average total $m \approx B = 3$.
+- The mutant fraction after growth was $x' \approx 0.58$ (strong shift due to exponential growth advantage with $e^{st^*} = e^1 \approx 2.72$).
+
+In Part 2 (stickiness, $\xi=0.3$, $B=3$, $x=1/3$):
+
+- The average total $m = B(1 + x\xi) = 3(1 + 0.1) = 3.3$ — slightly larger than $B$.
+- The expected mutant fraction after sampling: $\frac{Bx(1+\xi)}{B(1+x\xi)} = \frac{x(1+\xi)}{1+x\xi} = \frac{(1/3)(1.3)}{1.1} \approx 0.394$.
+
+**Impact:** The fitness advantage during growth ($s = 0.1$ with $t^* = 10$) gives a **much larger** boost to the mutant fraction than stickiness ($\xi = 0.3$). The growth advantage compounds exponentially over $t^*$, while stickiness provides only a linear multiplicative factor at sampling. However, stickiness also increases the total population size (reducing extinction risk), which fitness does not.
+
+#### Question 4
+
+```{r}
+#| fig-height: 7
+#| fig-width: 9
+
+xi <- 0.3; B <- 5; N_pop <- 1e5; x_init <- 1/5
+n_bottlenecks <- 500
+n_replicates <- 1000
+
+k_all <- rep(round(x_init * B), n_replicates)  # 1 mutant
+l_all <- rep(B - round(x_init * B), n_replicates)  # 4 wild-types
+
+frac_all_extinct <- numeric(n_bottlenecks)
+frac_mut_extinct <- numeric(n_bottlenecks)
+frac_wt_extinct <- numeric(n_bottlenecks)
+
+for (step in 1:n_bottlenecks) {
+  m_total <- k_all + l_all
+  x_current <- ifelse(m_total > 0, k_all / m_total, 0)
+
+  # No growth advantage (neutral), x doesn't change
+  # Sticky sampling
+  k_new <- rbinom(n_replicates, size = N_pop, prob = B * x_current * (1 + xi) / N_pop)
+  l_new <- rbinom(n_replicates, size = N_pop, prob = B * (1 - x_current) / N_pop)
+
+  k_new[m_total == 0] <- 0
+  l_new[m_total == 0] <- 0
+
+  k_all <- k_new
+  l_all <- l_new
+
+  frac_all_extinct[step] <- mean(k_all == 0 & l_all == 0)
+  frac_mut_extinct[step] <- mean(k_all == 0 & l_all > 0)
+  frac_wt_extinct[step] <- mean(k_all > 0 & l_all == 0)
+}
+
+plot(1:n_bottlenecks, frac_all_extinct, type = "l", col = "black", lwd = 2,
+     xlab = "Number of bottlenecks", ylab = "Fraction of replicates",
+     main = "Part 2, Q4: Serial passage - sticky mutants (xi=0.3, B=5)",
+     ylim = c(0, 1))
+lines(1:n_bottlenecks, frac_mut_extinct, col = "blue", lwd = 2)
+lines(1:n_bottlenecks, frac_wt_extinct, col = "red", lwd = 2)
+legend("right", legend = c("All extinct", "Only mutants extinct", "Only WT extinct"),
+       col = c("black", "blue", "red"), lwd = 2, cex = 0.8)
+```
+
+**Key differences with Part 1:**
+
+1. **Mutant fixation is slower:** In Part 1, the strong fitness advantage ($s = 0.1$ amplified by $t^* = 10$) caused rapid fixation. With stickiness alone, the per-step advantage is much smaller, so fixation takes many more passages.
+2. **Both mutant extinction and fixation are slower:** Stickiness provides a weaker per-bottleneck advantage than exponential growth, so drift dominates more and the resolution of polymorphism takes longer.
+3. **Total extinction is slightly lower:** Because sticky mutants increase the effective bottleneck size, total population extinction is somewhat reduced.
+4. **Mutant still fixes more often than it goes extinct:** Stickiness provides a systematic advantage at each dilution, biasing toward mutant fixation — but the bias is weaker than with the fitness advantage.
+
+
+### Part 3: multi-well dynamics
+
+#### Question 1
+
+**Why is each well approximately fully wild-type or fully mutant?**
+
+From Parts 1 and 2, within-well polymorphism resolves quickly (fixation or loss of the mutant happens within ~50–100 bottlenecks), much faster than total population extinction (which takes hundreds to thousands of steps). Once one type fixes in a well, it stays fixed since we neglect new mutations. Therefore, on the timescale of inter-well dynamics, each well is effectively monomorphic.
+
+**What needs to happen for $i$ to increase by 1?**
+
+A wild-type well must go extinct at a dilution step, and then be reseeded with a mutant bacterium. Extinction occurs with probability $\approx e^{-B}$ per step per well. The reseeding bacterium is drawn from the discarded pool with probability $i/D$ of being mutant. So $i$ increases by 1 when a wild-type well goes extinct AND the reseeding bacterium is mutant.
+
+**Does mutant fitness impact this process?**
+
+No. In the large-$N$ limit, the extinction probability is $e^{-B}$, independent of $s$. Each monomorphic well has the same extinction probability regardless of which type it contains. The reseeding probability is $i/D$, depending only on the number of mutant wells. Thus, the process is a **neutral Moran-like** model at the well level — fitness provides no inter-well advantage.
+
+#### Question 2
+
+```{r}
+#| fig-height: 8
+#| fig-width: 10
+
+D <- 5; B <- 3; N_pop <- 1e5
+n_steps <- 500; n_replicates <- 1000
+
+# Plot 20 trajectories
+set.seed(42)
+plot(NULL, xlim = c(1, n_steps), ylim = c(0, D),
+     xlab = "Dilution step", ylab = "Number of mutant wells (i)",
+     main = "Part 3, Q2: Multi-well (fitness, D=5, B=3)")
+
+for (rep in 1:20) {
+  wells <- c(TRUE, rep(FALSE, D - 1))  # 1 mutant well, 4 WT wells
+  i_traj <- numeric(n_steps)
+
+  for (step in 1:n_steps) {
+    i_current <- sum(wells)
+
+    # Each well survives independently (same extinction prob for all)
+    survivors <- rbinom(D, size = N_pop, prob = B / N_pop)
+    extinct <- (survivors == 0)
+
+    # Reseed extinct wells
+    if (any(extinct)) {
+      for (w in which(extinct)) {
+        wells[w] <- (runif(1) < i_current / D)
+      }
+    }
+
+    i_traj[step] <- sum(wells)
+  }
+
+  lines(1:n_steps, i_traj, col = rgb(0, 0, 0, 0.3))
+}
+```
+
+```{r}
+# Run 1000 replicates
+set.seed(123)
+n_all_mutant <- 0
+
+for (rep in 1:n_replicates) {
+  wells <- c(TRUE, rep(FALSE, D - 1))
+
+  for (step in 1:n_steps) {
+    i_current <- sum(wells)
+    if (i_current == 0 || i_current == D) break  # absorbing states
+
+    survivors <- rbinom(D, size = N_pop, prob = B / N_pop)
+    extinct <- (survivors == 0)
+
+    if (any(extinct)) {
+      for (w in which(extinct)) {
+        wells[w] <- (runif(1) < i_current / D)
+      }
+    }
+  }
+
+  if (sum(wells) == D) n_all_mutant <- n_all_mutant + 1
+}
+
+cat("Fraction of replicates where all wells are mutant:", n_all_mutant / n_replicates, "\n")
+```
+
+**Interpretation:** The fraction of replicates where all wells end up mutant represents the **fixation probability** of the mutant type at the inter-well level. Since the process is neutral at the well level (fitness does not affect extinction probability), this should be approximately equal to the initial frequency of mutant wells, i.e., $1/D = 1/5 = 0.2$. This is the classic result from neutral population genetics: in a neutral Moran-like process, the fixation probability equals the initial frequency.
+
+#### Question 3
+
+If mutants are stickier, then a mutant well has a larger effective bottleneck size $B(1+\xi)$ compared to a wild-type well with bottleneck $B$. This means:
+
+- **Mutant wells go extinct less often**: $P(\text{extinct, mutant well}) = e^{-B(1+\xi)} < e^{-B} = P(\text{extinct, WT well})$.
+- Since only extinct wells get reseeded, wild-type wells go extinct more often and thus are more likely to be replaced. This results in a **net advantage for the mutant** at the inter-well level.
+- This is a qualitative difference from fitness: fitness does not help at the multi-well level (neutral Moran), but **stickiness does** because it changes the extinction rate asymmetrically between types.
+
+#### Question 4
+
+```{r}
+#| fig-height: 8
+#| fig-width: 10
+
+D <- 5; B <- 3; N_pop <- 1e5; xi <- 0.3
+n_steps <- 500; n_replicates <- 1000
+
+# Plot 20 trajectories
+set.seed(42)
+plot(NULL, xlim = c(1, n_steps), ylim = c(0, D),
+     xlab = "Dilution step", ylab = "Number of mutant wells (i)",
+     main = "Part 3, Q4: Multi-well (sticky, xi=0.3, D=5, B=3)")
+
+for (rep in 1:20) {
+  wells <- c(TRUE, rep(FALSE, D - 1))
+  i_traj <- numeric(n_steps)
+
+  for (step in 1:n_steps) {
+    i_current <- sum(wells)
+
+    # Mutant wells: effective bottleneck B*(1+xi); WT wells: B
+    extinct <- logical(D)
+    for (w in 1:D) {
+      eff_B <- ifelse(wells[w], B * (1 + xi), B)
+      surv <- rbinom(1, size = N_pop, prob = eff_B / N_pop)
+      extinct[w] <- (surv == 0)
+    }
+
+    if (any(extinct)) {
+      for (w in which(extinct)) {
+        wells[w] <- (runif(1) < i_current / D)
+      }
+    }
+
+    i_traj[step] <- sum(wells)
+  }
+
+  lines(1:n_steps, i_traj, col = rgb(0, 0, 0, 0.3))
+}
+```
+
+```{r}
+# Run 1000 replicates
+set.seed(123)
+n_all_mutant <- 0
+
+for (rep in 1:n_replicates) {
+  wells <- c(TRUE, rep(FALSE, D - 1))
+
+  for (step in 1:n_steps) {
+    i_current <- sum(wells)
+    if (i_current == 0 || i_current == D) break
+
+    extinct <- logical(D)
+    for (w in 1:D) {
+      eff_B <- ifelse(wells[w], B * (1 + xi), B)
+      surv <- rbinom(1, size = N_pop, prob = eff_B / N_pop)
+      extinct[w] <- (surv == 0)
+    }
+
+    if (any(extinct)) {
+      for (w in which(extinct)) {
+        wells[w] <- (runif(1) < i_current / D)
+      }
+    }
+  }
+
+  if (sum(wells) == D) n_all_mutant <- n_all_mutant + 1
+}
+
+cat("Fraction of replicates where all wells are mutant:", n_all_mutant / n_replicates, "\n")
+```
+
+**Comment:** With sticky mutants, the fixation probability is **higher than $1/D = 0.2$**. This is because mutant wells have a lower extinction probability than wild-type wells, giving them a selective advantage at the inter-well level. The process is no longer neutral: stickiness creates an asymmetry in extinction rates that favors the mutant. This contrasts sharply with the fitness case (Q2), where the fixation probability was $\approx 1/D$ because fitness does not affect well-level extinction.
+
+#### Question 5
+
+```{r}
+# Case 1: Fitter mutants (s = 0.1)
+set.seed(42)
+s <- 0.1; D <- 5; B <- 3; N_pop <- 1e5; x_init <- 1/3; t_star <- 10
+n_steps <- 500; n_replicates <- 1000
+
+n_all_mutant_fit <- 0
+
+for (rep in 1:n_replicates) {
+  # Well 1: 1 mutant, 2 wild-types. Wells 2-5: 3 wild-types each
+  well_k <- c(1, rep(0, D - 1))
+  well_l <- c(2, rep(B, D - 1))
+
+  for (step in 1:n_steps) {
+    # Check absorbing: all mutant or all wild-type
+    if (sum(well_k) == 0 && sum(well_l) > 0) break  # all WT
+    if (sum(well_l) == 0 && sum(well_k) > 0) break  # all mutant
+    if (sum(well_k) == 0 && sum(well_l) == 0) break  # all extinct
+
+    new_k <- numeric(D)
+    new_l <- numeric(D)
+
+    for (w in 1:D) {
+      m_w <- well_k[w] + well_l[w]
+      if (m_w == 0) { new_k[w] <- 0; new_l[w] <- 0; next }
+
+      x_w <- well_k[w] / m_w
+      # Growth phase: mutant fraction changes
+      if (x_w > 0 && x_w < 1) {
+        x_after <- x_w * exp(s * t_star) / (x_w * exp(s * t_star) + (1 - x_w))
+      } else {
+        x_after <- x_w
+      }
+      # Dilution
+      new_k[w] <- rbinom(1, size = N_pop, prob = B * x_after / N_pop)
+      new_l[w] <- rbinom(1, size = N_pop, prob = B * (1 - x_after) / N_pop)
+    }
+
+    # Reseed extinct wells
+    extinct_wells <- which(new_k + new_l == 0)
+    if (length(extinct_wells) > 0) {
+      # Compute mutant fraction in the pool (across all wells)
+      total_k <- sum(well_k)
+      total_l <- sum(well_l)
+      total <- total_k + total_l
+      p_mut <- ifelse(total > 0, total_k / total, 0)
+
+      for (w in extinct_wells) {
+        if (runif(1) < p_mut) {
+          new_k[w] <- 1; new_l[w] <- 0
+        } else {
+          new_k[w] <- 0; new_l[w] <- 1
+        }
+      }
+    }
+
+    well_k <- new_k
+    well_l <- new_l
+  }
+
+  if (sum(well_l) == 0 && sum(well_k) > 0) {
+    n_all_mutant_fit <- n_all_mutant_fit + 1
+  }
+}
+
+cat("Fitter mutants (s=0.1): Fraction all wells mutant =",
+    n_all_mutant_fit / n_replicates, "\n")
+```
+
+```{r}
+# Case 2: Stickier mutants (xi = 0.3)
+set.seed(42)
+xi <- 0.3; D <- 5; B <- 3; N_pop <- 1e5; x_init <- 1/3
+n_steps <- 500; n_replicates <- 1000
+
+n_all_mutant_sticky <- 0
+
+for (rep in 1:n_replicates) {
+  well_k <- c(1, rep(0, D - 1))
+  well_l <- c(2, rep(B, D - 1))
+
+  for (step in 1:n_steps) {
+    if (sum(well_k) == 0 && sum(well_l) > 0) break
+    if (sum(well_l) == 0 && sum(well_k) > 0) break
+    if (sum(well_k) == 0 && sum(well_l) == 0) break
+
+    new_k <- numeric(D)
+    new_l <- numeric(D)
+
+    for (w in 1:D) {
+      m_w <- well_k[w] + well_l[w]
+      if (m_w == 0) { new_k[w] <- 0; new_l[w] <- 0; next }
+
+      x_w <- well_k[w] / m_w
+      # No growth advantage (neutral), x doesn't change
+      # Sticky sampling
+      new_k[w] <- rbinom(1, size = N_pop, prob = B * x_w * (1 + xi) / N_pop)
+      new_l[w] <- rbinom(1, size = N_pop, prob = B * (1 - x_w) / N_pop)
+    }
+
+    # Reseed extinct wells
+    extinct_wells <- which(new_k + new_l == 0)
+    if (length(extinct_wells) > 0) {
+      total_k <- sum(well_k)
+      total_l <- sum(well_l)
+      total <- total_k + total_l
+      p_mut <- ifelse(total > 0, total_k / total, 0)
+
+      for (w in extinct_wells) {
+        if (runif(1) < p_mut) {
+          new_k[w] <- 1; new_l[w] <- 0
+        } else {
+          new_k[w] <- 0; new_l[w] <- 1
+        }
+      }
+    }
+
+    well_k <- new_k
+    well_l <- new_l
+  }
+
+  if (sum(well_l) == 0 && sum(well_k) > 0) {
+    n_all_mutant_sticky <- n_all_mutant_sticky + 1
+  }
+}
+
+cat("Stickier mutants (xi=0.3): Fraction all wells mutant =",
+    n_all_mutant_sticky / n_replicates, "\n")
+```
+
+**Comparison and comment:**
+
+Starting from a single mutant bacterium (1 out of 3) in one well, while all other wells are fully wild-type:
+
+- **Fitter mutants ($s = 0.1$):** The mutant first needs to survive drift and fix within its well (fast, due to the strong growth advantage). Then it must spread across all 5 wells. But at the inter-well level, the process is **neutral** — all wells have the same extinction probability $e^{-B}$ regardless of type. So the overall fixation probability is: (probability of within-well fixation) $\times$ (probability of inter-well fixation starting from 1/5) $\approx p_{\text{fix,within}} \times 1/5$.
+
+- **Stickier mutants ($\xi = 0.3$):** Within-well fixation is slower (weaker per-step advantage). But at the inter-well level, stickiness provides a **real advantage**: mutant wells go extinct less often than wild-type wells. So even though within-well dynamics are slower, the inter-well selective advantage compensates.
+
+The stickier mutant is expected to have a **higher overall fixation probability** because stickiness provides an advantage at the critical inter-well level (where the neutral fitness model cannot help), whereas the fitness advantage only helps locally within a well. This demonstrates that in structured populations with extinction-reseeding dynamics, traits that reduce local extinction (like stickiness/biofilm formation) can be more advantageous than traits that increase growth rate.
