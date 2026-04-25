@@ -1,0 +1,496 @@
+---
+title: "BIO-463: Bulk RNA-sequencing Analysis II"
+author: "Raphaëlle Luisier"
+date: "April 2025"
+output:
+  html_document:
+    theme: paper
+#paper readable
+    highlight: monochrome
+    code_folding: hide
+    toc: true
+    toc_depth: 2
+#    toc_float: true
+    number_sections: true
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(cache =TRUE)
+knitr::opts_chunk$set(fig.width=16, fig.height=10, figure.align = "center") 
+rm(list = ls())
+
+
+
+if (!require("BiocManager", quietly = TRUE))
+  BiocManager::install("BiocManager")
+if (!require("DESeq2", quietly = TRUE))
+  BiocManager::install("DESeq2")
+if (!require("gplots", quietly = TRUE))
+  BiocManager::install("gplots")
+library("DESeq2")
+if (!require("ape", quietly = TRUE))
+  BiocManager::install("ape")
+library("ape")
+if (!require("limma", quietly = TRUE))
+  BiocManager::install("limma")
+library("limma")
+if (!require("geneplotter", quietly = TRUE))
+  BiocManager::install("geneplotter")
+library("geneplotter")
+if (!require("gprofiler2", quietly = TRUE))
+  BiocManager::install("gprofiler2")
+library("gprofiler2")
+if (!require("edgeR", quietly = TRUE))
+  BiocManager::install("edgeR")
+library("edgeR")
+
+```
+
+# Week 8 Exercises objectives 
+
+The exercises for **Week 8** are designed to help you become familiar with **Singular Value Decomposition (SVD)** and understand how this powerful mathematical tool can be used to interpret complex biological experiments that involve **time-series data** and **multiple covariates**.
+
+We will continue working with the same dataset used in **Week 7**. All data pre-processing steps are provided.
+
+The exercises begin in the section titled `SVD`.
+
+# Load the data {.tabset}
+The high-throughput poly(A) RNA-seq data used in this notebook are described in [Neeves et al, Brain (2022)](https://pubmed.ncbi.nlm.nih.gov/33693641/). They are derived from nuclear and cytoplasmic fractions of human induced pluripotent stem cells (hiPSC; day 0), neural precursors (NPC; day 3 and day 7), ‘patterned’ precursor motor neurons (ventral spinal cord; pMN; day 14), post-mitotic but electrophysiologically immature motor neurons (MN; day 22), and electrophysiologically active MNs (mMNs; day 35). The data required for this practical session can be downloaded from [Zenodo](https://zenodo.org/records/10944047).
+
+![Schematic depicting the iPSC differentiation strategy for motor neurogenesis. Arrows indicate sampling time-points in days when cells were fractionated into nuclear and cytoplasmic compartments prior to deep (polyA) RNA-sequencing. Four iPSC clones were obtained from four different healthy controls and three iPSC clones from two ALS patients with VCP mutations: R155C and R191Q; hereafter termed VCPmu. Induced-pluripotent stem cells (iPSC); neural precursors (NPC); “patterned” precursor motor neurons (ventral spinal cord; pMN); post-mitotic but electrophysiologically inactive motor neurons (MN); electrophysiologically active MNs (mMN).](./protocol.png)
+
+The gene expression count data was obtained from [Kallisto](https://pachterlab.github.io/kallisto/about) (Bray et al., 2016) using the Gencode hg38 release Homo sapiens transcriptome. 
+
+```{r load_data,warning=FALSE,fig.width=8, fig.height=4}
+load("./data_09_04_2024.RData")
+#Data: 
+# myE_ge                  : raw gene expression count matrix 
+# info                    : sample annotation (data-frame)
+# ttg                     : rows (genes) annotation
+
+# Focus on CTRL samples for this session
+sel_samples <- which(info$mutant=="CTRL")
+myE_ge      <- myE_ge[,sel_samples]
+info        <- info[sel_samples,]
+info$group  <- factor(paste(info$Fraction,info$DIV,sep="_"),levels=unique(paste(info$Fraction,info$DIV,sep="_")))
+
+
+#Make some nice colors to facilitate the visualisation of time-points
+mytime                 <- factor(as.character(info$DIV),levels=c(0,3,7,14,22,35))
+mycols_days            <- c("#CCFF00","#33CC33","#669999","#6699FF","#3300FF","#CC33CC")
+names(mycols_days)     <- c(0,3,7,14,22,35)
+mycols                 <- unlist(lapply(info$DIV,function(Z)return(mycols_days[match(as.character(Z),names(mycols_days))])))
+
+```
+
+
+
+# Pre-processing of the count data
+We first need to preprocess the data as learned during **Week 7**. The steps include:
+
+- **Variance stabilization** using a log-transformation.
+- **Identification of reliably expressed genes** by fitting a bimodal distribution to the log<sub>2</sub>-read count distribution of each sample. This allows us to discriminate between foreground (true signal) and background (noise) transcription.
+- The threshold separating foreground and background must be fitted individually for each sample, as library size can significantly influence this factor.
+- **Quantile normalization** to ensure comparability across samples.
+
+
+```{r variance_analysis_corrected,warning=FALSE,eval=TRUE}
+# 1. Log-transform your count data
+myE_gel <- log2(1+myE_ge)
+
+# 2. Fit bimodal distribution
+bimdens              <- lapply(c(1:ncol(myE_gel)),function(IX)return(mclust::densityMclust(data=myE_gel[,IX],G=2,plot=FALSE)))
+
+# 3. Identify limit that discriminate foreground from background
+Lims                 <- unlist(lapply(bimdens,function(x)return(qnorm(0.99,mean=x$parameters$mean[1],sd=sqrt(x$parameters$variance$sigmasq[1])))))
+
+# 4. Select reliably expressed genes in each sample
+is_expressed_samples            <- do.call(lapply(c(1:ncol(myE_gel)),function(IX)return(myE_gel[,IX]>Lims[IX])),what=cbind)
+no_reliably_expressed_genes_samples <- apply(is_expressed_samples,2,sum)
+
+# 5. Select reliably expressed genes in each group
+is_expressed_groups  <- t(apply(is_expressed_samples,1,function(Z)return(tapply(Z,INDEX=factor(info$group),FUN=function(W)return(sum(W)==length(W))))))
+no_reliably_expressed_genes_group <- apply(is_expressed_groups,2,sum)
+
+# 6. Select reliably expressed genes in at least one of the groups
+is_expressed_global  <- apply(is_expressed_groups,1,sum)>=1#167'69 genes are reliably expressed in at least one group
+
+# 7. Create data-table with reliably expressed genes
+myE_gelf             <- myE_gel[is_expressed_global,]
+
+# 8. Quantile normalisation
+myE_gen               <- limma::normalizeQuantiles(myE_gelf)
+```
+
+
+
+# Singular Value Decomposition (SVD)
+
+While **hierarchical clustering**, explored in **Week 7**, can highlight prominent changes driven by a small subset of genes, it may overlook broader, more subtle patterns. In contrast, **Singular Value Decomposition (SVD)** is a powerful technique for uncovering independent sources of variation in gene expression data, potentially corresponding to distinct biological pathways.
+
+SVD is particularly effective for analyzing data with a **time component**, as it can reveal **gene expression programs** that vary over time, even when those changes are **nonlinear** or not directly proportional to time. This makes SVD a valuable tool for disentangling complex temporal dynamics in biological systems.
+
+
+```{r calculate_SVD,warning=FALSE}
+#SVD on the Gene Expression
+dat1         <- myE_gen
+SVD_eset     <- svd(dat1)
+```
+
+## Scree Plot and Shannon Entropy (SE)
+In the context of gene expression analysis, SVD decomposes the data matrix into a set of orthogonal components (also known as singular vectors), each associated with a singular value. The **square of each singular value** reflects the **amount of variance** captured by each component. To compute the **proportion of variance explained**, each squared singular value is divided by the **sum of all squared singular values**.
+
+A **scree plot** is a graphical representation of how much variance in the original data is captured by each component obtained from **Singular Value Decomposition (SVD)**. It helps to identify how many components are meaningful. The point at which the curve levels off—the so-called **"elbow"**—indicates where additional components contribute relatively little to explaining the overall variance.
+
+The **Shannon Entropy** of the distribution of variance explained by each SVD component is a useful metric for assessing how information is distributed across components. If the variance is **concentrated in a single component**, the entropy will be **close to zero**, indicating that most of the structure in the data is captured by that one component. Conversely, if the variance is **evenly spread** across many components, the entropy will be higher, reflecting a more complex or diffuse structure
+
+In **omics data**, it's common for the **first component** to explain a large proportion of the variance—often over **90%**. This dominant component usually reflects **systematic variability in basal gene expression** levels between genes, rather than specific biological signals of interest.
+
+
+```{r investigate_SVD,warning=FALSE,fig.width=4, fig.height=5}
+getFractionVariance<- function(mySVD){
+  return(mySVD$d*mySVD$d/sum(mySVD$d*mySVD$d))
+}
+
+getShannonEntropy <- function(pip)return(-1*sum(pip*log10(pip))/log10(length(pip)))
+
+ScrePlot <- function(pi,dp){
+  barplot(pi,las=1,cex.main=0.7,cex.axis=1.0,col="black")
+  mtext(side = 1, line = 2, text ="principal components", col = "black",cex=0.7, font=1)
+  mtext(side = 2, line = 2, text ="Fraction of explained variance", col = "black",cex=0.7, font=1)
+  mtext(side = 3, line = -2, text = paste("Shannon Entropy = ",round(dp,digits=3)), col = "black",cex=0.7, font=1)
+}
+
+#Get fraction variance
+pi_1         <- getFractionVariance(mySVD=SVD_eset)
+#Calculate the SE
+dp_1         <- getShannonEntropy(pi_1)
+
+ScrePlot(pi_1,dp_1)
+
+```
+
+
+## Systematic removal of the first component
+
+Since the **first SVD component** often captures the majority of variance in gene expression data—typically reflecting **systematic or basal variability** rather than meaningful biological patterns—it can be informative to remove it.
+
+This can be done by **subtracting the rank-one approximation** (i.e., the image of the first component) from the original data matrix. This operation effectively filters out the dominant source of variation, allowing downstream analyses to focus on **secondary components** that may represent more biologically relevant signals.
+
+We can now visualize the data after removing the first component to better explore these subtler patterns.
+
+```{r remove_first_component,warning=FALSE,fig.width=12, fig.height=8}
+#1. Remove the first principal component:
+datm         <- dat1-SVD_eset$d[1]*(SVD_eset$u[,1]%*%t(SVD_eset$v[,1]))
+#2. Calculate again the SVD
+SVD_2        <- svd(datm)
+#3. Calculate SE and fraction of variance captured
+pi_2         <- getFractionVariance(mySVD=SVD_2)
+dp_2         <- getShannonEntropy(pi_2)
+
+#3. Check the effects 
+par(mfrow=c(2,4))
+#3.1 SE and Scre plot
+ScrePlot(pi_1,dp_1)
+mtext(side=3,line=0,text="prior removing first component")
+#3.2 Effect on the sample distribution
+multidensity(dat1[,c(1,10,15,20)],main="prior filtering")
+boxplot(dat1,outline=FALSE)
+#3.3 Effect on the gene expression distribution
+boxplot(t(dat1[c(1,4,10,44,69,1000,2000,4000),]),outline=FALSE,las=2,ylab="log2(count)")
+
+ScrePlot(pi_2,dp_2)
+mtext(side=3,line=0,text="after removing first component")
+multidensity(datm[,c(1,10,15,20)],main="after filtering")
+boxplot(datm,outline=FALSE)
+boxplot(t(datm[c(1,4,10,44,69,1000,2000,4000),]),outline=FALSE,las=2,ylab="log2(count)")
+
+```
+
+## Scatter Plot of Samples in SVD Components
+
+A commonly used visualization in **PCA** and **SVD** analyses is the **scatter plot of samples projected onto the first few components**. This type of plot is particularly useful when the dataset contains one or two covariates, as it can reveal patterns, groupings, or trends associated with these variables.
+
+Although many studies focus primarily on the **first two components**, the **scree plot** provides guidance on how many components are truly informative and worth exploring.
+
+In the following section, you will generate scatter plots of the samples projected onto the **first four SVD components**, which may help uncover more nuanced structure in the data.
+
+
+```{r pca_svd,warning=FALSE,fig.width=10, fig.height=10}
+par(mfrow=c(4,4),mar=c(4,4,1,1))
+for(i in c(1:4)){
+  for(j in c(1:4)){ 
+    plot(SVD_2$v[,i], SVD_2$v[,j],col=mycols,xlab=paste("v",i),ylab=paste("v",j),pch=19,cex=1.5,las=1)
+    if(i==1 & j==1){
+      legend("topright",pch=19,col=mycols_days,ncol=1,leg=paste("d",names(mycols_days)),cex=0.6)
+    }
+  }
+}
+```
+
+
+### Dynamics of components over time
+
+In the previous section, we used classic scatter plots to explore the main SVD components. However, a more insightful approach to investigate the **temporal dynamics** of gene regulatory programs is to examine how the **component loadings** change over time.
+
+To do this, we plot the **average loading values** of samples grouped by **time point** and **condition** (e.g., nucleus vs. cytoplasm). This allows us to observe how each component behaves across time and under different experimental conditions, potentially revealing distinct temporal expression patterns.
+
+```{r component_over_time,warning=FALSE,fig.width=7, fig.height=7,eval=TRUE}
+#Extract the loading of the nuclear samples as well as info; create a new grouping
+myV_nuc <- SVD_2$v[which(info$Fraction=="Nuclear"),]
+info_nuc<- info[which(info$Fraction=="Nuclear"),]
+mygroup_nuc   <- factor(as.character(info_nuc$DIV),levels=c(0,3,7,14,22,35))
+
+#Extract the loading of the cytoplasmic samples as well as info
+myV_cyt <- SVD_2$v[which(info$Fraction=="Cytoplasmic"),]
+info_cyt<- info[which(info$Fraction=="Cytoplasmic"),]
+mygroup_cyt   <- factor(as.character(info_cyt$DIV),levels=c(0,3,7,14,22,35))
+
+#Compute the average and SD per group per singular vectors
+myMean_nuc <-  t(apply(myV_nuc,2,function(x)return(tapply(x,INDEX=mygroup_nuc,FUN=mean))))
+mySD_nuc   <-  t(apply(myV_nuc,2,function(x)return(tapply(x,INDEX=mygroup_nuc,FUN=sd))))
+
+myMean_cyt <-  t(apply(myV_cyt,2,function(x)return(tapply(x,INDEX=mygroup_cyt,FUN=mean))))
+mySD_cyt   <-  t(apply(myV_cyt,2,function(x)return(tapply(x,INDEX=mygroup_cyt,FUN=sd))))
+
+
+#Plot component over time
+days                <- c(0,3,7,14,21,35)
+cats                <- c("Gene Expression","AltEx","IR","3UTR","PUD")
+CEX<- 0.7
+par(mfrow=c(3,3),mar=c(5,5,2,0),oma=c(2,2,2,2))
+
+
+error.bar <- function(x, y, upper, lower=upper, length=0.1,...){
+  if(length(x) != length(y) | length(y) !=length(lower) | length(lower) != length(upper))
+    stop("vectors must be same length")
+  arrows(x,y+upper, x, y-lower, angle=90, code=3, length=length, ...)
+}
+
+for(i in c(1:9)){
+    MIN=min(0,min(c(myMean_nuc[i,]-mySD_nuc[i,],myMean_cyt[i,]-mySD_cyt[i,])))
+    MAX=max(c(myMean_nuc[i,]+mySD_nuc[i,],myMean_cyt[i,]+mySD_cyt[i,]))
+    
+    plot(days,myMean_nuc[i,],pch=19,type="b",lty=2,ylim=c(MIN,MAX),las=1,frame="F",xlab="time [days]",cex=1.0,cex.axis=CEX,cex.lab=CEX,ylab="")
+    mtext(side=2,line=3,text=paste("PC",i,sep=""),cex=CEX)
+    mtext(side=3,line=0,text=paste(round(100*getFractionVariance(SVD_2)[i],digit=2),"% of variance"),cex=CEX)
+    grid()
+    error.bar(x=days, y=myMean_nuc[i,], upper=mySD_nuc[i,],  length=0.05)
+    abline(h=0,col="red",lty=2)
+    
+    points(days,myMean_cyt[i,],pch=19,type="b",cex=1.0,cex.axis=CEX,col="grey")
+    lines(days,myMean_cyt[i,],lty=2,col="grey")
+    error.bar(x=days, y=myMean_cyt[i,], col="grey",upper=mySD_cyt[i,],  length=0.05)
+    
+    if(i==1){
+      legend("topright",pch=19,col=c("black","grey"),cex=0.6,leg=c("nuc","cyto"),ncol=2)
+    }
+}
+
+```
+
+## What Biological Pathways (BPs) associate with the singular vectors?
+
+After identifying the most interesting components—those that show **low within-group variability** and a **biologically meaningful temporal dynamic**—we can explore which **genes** are associated with these components. This is done by examining the **left singular vectors**, which represent the gene loadings.
+
+There are two main strategies for identifying relevant genes:
+
+1. **Contribution-based selection**: Extract genes that contribute the most (positively or negatively) to a component. These are the genes with the largest loadings in the left singular vectors—indicating large projection onto that component.
+
+2. **Correlation-based selection**: Identify genes whose expression profiles **correlate most** (positively or negatively) with the component scores across samples.
+
+Both strategies provide insights into different aspects of how genes relate to the underlying structure captured by SVD.
+
+### Extraction of top-contributing and most-correlated genes
+
+In the following section, we will extract genes that **contribute most** and
+
+```{r extract_most_contributing,warning=FALSE,fig.width=7, fig.height=7,eval=TRUE}
+
+#Compute correlation between two vectors
+funCor <- function(x,y){
+  x<-x-mean(x)
+  y<-y-mean(y)
+  return((x%*%y)/(sqrt(x%*%x)*sqrt(y%*%y)))
+}
+
+#Function to extract the most contributing genes with K-means
+funCl <- function(idx=1,proj,corr,PLOT=TRUE,nclusters=10){
+  
+  sub2             <- cbind(as.numeric(proj[,idx]),as.numeric(corr[,idx]))
+  sub2[is.na(sub2)]<-0
+  sub2             <- scale(sub2,center = TRUE, scale = TRUE)
+  require(limma)
+  km5   <- kmeans(sub2, centers = nclusters, nstart=25)
+  ix_max<- which(apply(sub2,1,sum)==max(apply(sub2,1,sum)))[1]
+  ix_min<- which(apply(sub2,1,sum)==min(apply(sub2,1,sum)))[1]
+  
+  cl_max <- km5$cluster[ix_max]
+  cl_min <- km5$cluster[ix_min]
+  
+  sela    <- km5$cluster==cl_max&abs(corr[,idx])>=0.5
+  selb    <- km5$cluster==cl_min&abs(corr[,idx])>=0.5
+  selmost <- rownames(proj)[sela]
+  selmin  <- rownames(proj)[selb]
+  
+  cols3                      <- rep("grey",length(km5$cluster))
+  cols3[sela] <- "red" 
+  cols3[selb] <- "blue" 
+  
+  if(PLOT){
+    plot(proj[,idx],corr[,idx],col=cols3,pch=19,cex=0.5,xlab="",ylab="",frame=F,las=1)
+    mtext(side=1,line=2,text="projection",cex=0.7)
+    mtext(side=2,line=2,text="correlation",cex=0.7)
+    grid()
+  }
+  
+  return(list(km5,selmost,selmin))
+}
+
+
+no.pi   <- 8 #number of component of interest
+no.cl   <- 8 #number of clusters
+
+#Compute the correlation of each gene with each singular vectors
+Cor_SVD <- matrix(nrow=nrow(datm), ncol=no.pi)
+for(i in 1:no.pi){
+      Cor_SVD[,i]<-apply(t(datm),2,funCor,SVD_2$v[,i])
+}
+
+#The project is readily available with the left matrix
+Proj_SVD           <- SVD_2$u%*%diag(SVD_2$d) #Gene projection onto eigengenes
+rownames(Proj_SVD) <- rownames(Cor_SVD)  <-rownames(datm)
+
+#Here we can now use funCl to extract the relevant genes
+par(mfrow=c(2,4))
+mySelb            <- list()
+for(X in c(1:no.pi)){
+  mySelb[[X]]<- funCl(idx=X,proj=Proj_SVD,corr=Cor_SVD,nclusters=no.cl)
+}
+```
+
+### Visual inspection of gene behavior
+
+Once we've identified the genes that contribute most (positively and negatively) to a given component, it's important to **visually inspect their expression patterns** to confirm they behave as expected.
+
+This can be done using **boxplots** or **heatmaps**, which help assess whether the gene expression patterns align with the trends captured by the components.
+
+We'll begin with **boxplots**, which allow us to compare expression levels across different **conditions** and **time points** for the top contributing genes.
+
+```{r boxplots,echo=FALSE, eval = FALSE,warning=FALSE,fig.width=9, fig.height=9,eval=TRUE}
+par(mfrow=c(3,4),mar=c(3,3,2,2))
+for(IX in c(1,2,3,4,5,6)){
+#Extract the gene expression matrix of the genes which contribute the most positively 
+mat      <- as.matrix(myE_gen[match(mySelb[[IX]][[2]],rownames(myE_gen)),])
+#Use the boxplot to visualise
+boxplot(mat,outline=F,col=mycols,las=1,xlab="",frame=FALSE,ylab="gene expression [log2]",main=paste("PC",IX,"(+)"))
+#Extract the gene expression matrix of the genes which contribute the most negatively  
+mat      <- as.matrix(myE_gen[match(mySelb[[IX]][[3]],rownames(myE_gen)),])
+#Use the boxplot to visualise
+boxplot(mat,outline=F,col=mycols,las=1,xlab="",frame=FALSE,ylab="gene expression [log2]",main=paste("PC",IX,"(-)"))
+}
+
+```
+
+
+Another useful visualization is the **heatmap**, which provides an intuitive overview of expression patterns across all samples for selected genes.
+
+Here, we will generate a heatmap for the genes that contribute **most positively** and **most negatively** to the **first component**. This allows us to assess whether these genes exhibit coherent expression patterns that align with the signal captured by the component.
+
+You are encouraged to extend this analysis to other components as well, to explore additional gene expression programs present in the data.
+
+```{r visualise_with_heatmap,warning=FALSE,fig.width=7, fig.height=7,eval=TRUE}
+#In order to faciliate the visualisation of gene dynamics across the samples, it is often the case that data are standardized.
+standardize <- function(z){
+  rowmed <- apply(z, 1, mean)
+  rowmad <- apply(z, 1, sd)
+  rv <- sweep(z, 1, rowmed)
+  rv <- sweep(rv, 1, rowmad, "/")
+  return(rv)
+}
+
+#Function to plot the Heatmap
+PlotHeatmapSelSVD <- function(dat1=myE_gen,mySelection=mySelb,myVi=c(1:6),colord=myorder){
+  
+  for(i in myVi){
+    vi=i
+    tx                  <- mySelection[[vi]][[2]]
+    mat                 <- as.matrix(dat1[match(tx,rownames(dat1)),colord])
+    GS                  <-  as.character(ttg$ext_gene)[match(rownames(mat),ttg$ens_gene)]
+    rownames(mat)       <- GS
+    mat                 <- standardize(mat)
+    dd                  <- as.matrix(dist(mat,method="man"))
+    diag(dd)            <- 0
+    dd.row              <- as.dendrogram(hclust(as.dist(dd),method="ward.D"))
+    row.ord             <- order.dendrogram(dd.row)
+    mypalette           <-  colorRampPalette(colors=c("blue","white","red"), bias = 1, space = c("rgb"), interpolate = c("linear"))
+    mycols              <-  mypalette(n=100)
+    b                   <-  seq(from=-max(abs(mat)),to=max(abs(mat)),length.out=101)
+    heatmap.2(mat[row.ord,], keysize=1,mar=c(6,5),col=mycols,breaks=b, scale="none",main=paste("V",i,"+"),Rowv=FALSE,Colv=NA,key=TRUE,symkey=FALSE, density.info="none", trace="none",cexCol=0.5, cexRow=0.5, font.lab=1,dendrogram="none")
+    
+
+    tx                   <- mySelection[[vi]][[3]]
+    mat                 <-  as.matrix(dat1[match(tx,rownames(dat1)),colord])
+    GS                  <-  as.character(ttg$ext_gene)[match(rownames(mat),ttg$ens_gene)]
+    rownames(mat)        <- GS
+    mat                 <- standardize(mat)
+    dd                  <- as.matrix(dist(mat,method="man"))
+    diag(dd)            <- 0
+    dd.row              <- as.dendrogram(hclust(as.dist(dd),method="ward.D"))
+    row.ord             <- order.dendrogram(dd.row)
+    mypalette           <-  colorRampPalette(colors=c("blue","white","red"), bias = 1, space = c("rgb"), interpolate = c("linear"))
+    mycols              <-  mypalette(n=100)
+    b                   <-  seq(from=-max(abs(mat)),to=max(abs(mat)),length.out=101)
+    heatmap.2(mat[row.ord,], keysize=1,main=paste("V",i,"(-)"),mar=c(6,5),col=mycols,breaks=b, scale="none",Rowv=FALSE,Colv=NA,key=TRUE,symkey=FALSE, density.info="none", trace="none",cexCol=0.5, cexRow=0.5, font.lab=1,dendrogram="none")
+  }
+}
+
+```
+
+
+```{r plot_heatmap,echo=FALSE, eval = FALSE,warning=FALSE,fig.width=7, fig.height=7,eval=TRUE}
+
+PlotHeatmapSelSVD(dat1=myE_gen,mySelection=mySelb,myVi=1,colord=c(1:ncol(myE_gen)))
+
+```
+
+## Biological Pathway Gene Enrichment Analysis
+
+After validating the expression dynamics of the top contributing genes, the next step is to assess the **biological significance** of the identified components.
+
+This can be achieved by performing **gene set enrichment analysis** on the genes that contribute most strongly (positively or negatively) to each component. This analysis helps identify **biological pathways** or **functional categories** that are overrepresented, providing insight into the **gene regulatory programs** captured by the singular vectors.
+
+By linking components to known pathways, we can better interpret the biological meaning of the structure uncovered by SVD.
+
+```{r go_analysis,echo=FALSE, eval = TRUE,warning=FALSE}
+
+GO_analysis <- function(genes_list){
+  gostres_diff <- gost(query = genes_list, 
+                  organism = "hsapiens", ordered_query = FALSE, 
+                  multi_query = FALSE, significant = TRUE, exclude_iea = FALSE, 
+                  measure_underrepresentation = FALSE, evcodes = TRUE, 
+                  user_threshold = 0.05, correction_method = "g_SCS", 
+                  domain_scope = "annotated", custom_bg = NULL, 
+                  numeric_ns = "", as_short_link = FALSE,sources=c("GO:BP", "KEGG"))
+  gostplot(gostres_diff, capped = FALSE, interactive = TRUE)#please note this is going to create an interactive plot
+}
+
+
+```
+
+
+Below are the **Gene Ontology Biological Processes (GO BPs)** enriched among the genes that contribute most positively to **Principal Component 1 (PC1)**. 
+
+```{r plot_enrichemtPos,echo=TRUE, eval = FALSE,warning=FALSE,fig.width=7, fig.height=7,eval=TRUE}
+GO_analysis(mySelb[[1]][[2]])
+
+```
+
+Below are the **Gene Ontology Biological Processes (GO BPs)** enriched among the genes that contribute most negatively to **Principal Component 1 (PC1)**. 
+```{r plot_enrichemtNeg,echo=TRUE, eval = FALSE,warning=FALSE,fig.width=7, fig.height=7,eval=TRUE}
+GO_analysis(mySelb[[1]][[3]])
+
+```

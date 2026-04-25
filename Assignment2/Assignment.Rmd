@@ -1,0 +1,511 @@
+---
+title: "BIO-463: CosMx Spatial Transcriptomics — Mouse Brain Analysis"
+subtitle: "Assignment II"
+author: "AI for RNA Lab, University of Bern"
+date: "April 2026"
+output:
+  html_document:
+    theme: paper
+    highlight: monochrome
+    toc: true
+    toc_depth: 2
+    number_sections: true
+  pdf_document:
+    toc: true
+    toc_depth: '2'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(cache = TRUE)
+knitr::opts_chunk$set(fig.width = 16, fig.height = 10, fig.align = "center")
+rm(list = ls())
+
+# ── Package installation and loading ──────────────────────────────────────────
+# Run this block once. If a package fails to install, restart R and try again.
+
+if (!require("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+pkgs_bioc <- c("zellkonverter", "SingleCellExperiment",
+               "scuttle", "SingleR", "S4Vectors",
+               "GenomicRanges", "IRanges", "Biobase")
+for (p in pkgs_bioc) {
+  if (!require(p, quietly = TRUE, character.only = TRUE))
+    BiocManager::install(p)
+  library(p, character.only = TRUE)
+}
+
+pkgs_cran <- c("Seurat", "ggplot2", "patchwork", "dplyr", "gprofiler2")
+for (p in pkgs_cran) {
+  if (!require(p, quietly = TRUE, character.only = TRUE))
+    install.packages(p)
+  library(p, character.only = TRUE)
+}
+
+# Note: leidenAlg can be difficult to install from source on some systems
+# (particularly macOS arm64). If installation fails, use algorithm = 1
+# (Louvain) in FindClusters() instead — results will be very similar.
+if (!require("leidenAlg", quietly = TRUE)) {
+  tryCatch(
+    install.packages("leidenAlg", type = "binary"),
+    error = function(e) message("leidenAlg not available — use algorithm=1 below")
+  )
+}
+if (requireNamespace("leidenAlg", quietly = TRUE)) library(leidenAlg)
+
+
+# ── Colour palette used throughout ───────────────────────────────────────────
+# make_palette(n) returns n visually distinct colours regardless of cluster count.
+make_palette <- function(n) {
+  base <- c(
+    "#4E79A7","#F28E2B","#E15759","#76B7B2","#59A14F","#2ecc71","#708090",
+    "#800000","#EDC948","#B07AA1","#FF9DA7","#9C755F","#BAB0AC","#D37295",
+    "#ff7f50","#e74c3c","#3498db","#9b59b6","#f1c40f","#2c3e50","#27ae60",
+    "#1a5276","#48c9b0","#e67e22","#a569bd","#117a65","#cb4335"
+  )
+  if (n <= length(base)) return(base[seq_len(n)])
+  # fall back to hue-spaced colours if more clusters than base colours
+  grDevices::hcl.colors(n, palette = "Dark 3")
+}
+
+# call this wherever you need colours, e.g.:
+#   scale_colour_manual(values = make_palette(nlevels(GE$seurat_clusters)))
+```
+
+---
+
+# Background
+
+In this assignment you will analyse **spatial single-cell transcriptomic data**
+generated with the
+[CosMx Spatial Molecular Imager](https://brukerspatialbiology.com/products/cosmx-spatial-molecular-imager/ffpe-dataset/cosmx-smi-mouse-brain-ffpe-dataset/)
+(NanoString/Bruker) from a mouse brain tissue section (coronal hemisphere).
+
+Spatial transcriptomics enables the simultaneous measurement of gene expression
+and physical location of cells within a tissue section. Unlike bulk or
+dissociated single-cell RNA-seq, it preserves the spatial context of
+transcriptional heterogeneity — allowing us to ask not only *which* cell types
+are present, but *where* they reside within the tissue.
+
+The CosMx platform preserves the spatial position of each cell within the
+tissue, enabling not only the identification of cell types but also the study of
+how they are physically organised within anatomical structures.
+
+[![Figure 1: Schematic of imaging-based spatial transcriptomics approaches
+(Xenium, MERFISH, CosMx). Source: Wang et al. (2025)](./cosmx_schematic.png){width="55%"}](https://www.nature.com/articles/s41467-025-64990-y)
+
+---
+
+# Task
+
+Using the spatial transcriptomics dataset, produce the following:
+
+**(1) One (or two) scientific figure(s)** addressing the question:
+
+> *What does the data reveal about the transcriptional diversity of cells in the
+> mouse brain, and how are distinct cell populations spatially distributed
+> across the tissue?*
+
+Your figure should convey a **single, compelling biological message**. You are
+free to choose the analytical method(s) you consider most appropriate
+(e.g. dimensionality reduction, clustering, spatial mapping), but your choice
+must be **justified** — either explicitly in your legend or implicitly through
+the figure design.
+
+**(2) A figure legend** written in the style of a research article: concise,
+self-contained, and defining all visual elements (axes, colours, groups, method
+used).
+
+**(3) A short results paragraph** (3–4 sentences) describing what you observe,
+its biological meaning, and its connection to the context of the study.
+
+---
+
+## Grading summary (Total: /20 · Grade: 1 + score/5)
+
+| Component | Marks |
+|:---|:---:|
+| 1. Figure — method choice and clarity | /6 |
+| 2. Figure legend — paper style | /6 |
+| 3. Interpretation and link to study context | /6 |
+| 4. Scientific communication | /2 |
+| **Total** | **/20** |
+
+Assessment prioritises **clarity**, **justification of analytical choices**, and
+**biological interpretation**, rather than technical complexity alone.
+
+---
+
+# The dataset
+
+The dataset uses a targeted CosMx Mouse Neuroscience RNA panel of **~950 genes**
+measured across thousands of cells. Because the panel is already focused on
+biologically relevant targets, we deliberately **do not perform Highly Variable
+Gene (HVG) selection** before dimensionality reduction — filtering genes at this
+stage would risk discarding signal from rare cell populations.
+
+CosMx data are generated using an
+[imaging-based approach](https://www.nature.com/articles/s41587-022-01483-z)
+where RNA molecules are detected *in situ* via sequential fluorescent probe
+hybridisation cycles. Each cell retains its spatial $(x, y)$ position in the
+tissue throughout.
+
+---
+
+# Provided pre-processing pipeline
+
+## What has already been done
+
+You start from a **pre-normalised Seurat object** (`adata_final_format_r.rds`)
+produced by an upstream Python pipeline that has already performed:
+
+- QC: removal of negative probes and cells with zero counts
+- Library-size normalisation
+- log1p transformation
+
+This workflow follows the protocol described in
+[Salas et al. (2025)](https://www.biorxiv.org/content/10.64898/2025.12.07.692889v1).
+
+> **Important:** because the data were normalised in Python, we **skip**
+> `NormalizeData()` in R to avoid double-transformation. The line
+> `obj[["RNA"]]$data <- obj[["RNA"]]$counts` below simply tells Seurat where
+> to find the normalised values for downstream steps such as PCA — it does not
+> change the data.
+
+## Load the data
+
+```{r load_data}
+# Load the prepared Seurat object
+# (counts = log-normalised expression; spatial coordinates in metadata)
+obj <- readRDS("./adata_final_format_r.rds")
+
+cat("Cells :", ncol(obj), "\n")
+cat("Genes :", nrow(obj), "\n")
+cat("Metadata columns:", paste(colnames(obj@meta.data), collapse = ", "), "\n")
+```
+
+## Check spatial coordinates
+
+CosMx spatial coordinates (`x_um`, `y_um`, in micrometres) are stored in the
+Seurat metadata (`obj@meta.data`).
+
+```{r check_metadata}
+head(obj@meta.data[, c("x_um", "y_um", "fov",
+                       "total_counts", "n_genes_by_counts", "snr")])
+
+cat("X range:", round(range(obj$x_um, na.rm = TRUE)), "µm\n")
+cat("Y range:", round(range(obj$y_um, na.rm = TRUE)), "µm\n")
+cat("FOVs   :", length(unique(obj$fov)), "\n")
+```
+
+```{r spatial_overview, fig.width=12, fig.height=5}
+df <- as.data.frame(obj@meta.data)
+
+p1 <- ggplot(df, aes(x = x_um, y = y_um)) +
+  geom_point(size = 0.1, color = "#2C3E50") +
+  coord_fixed() + theme_minimal() +
+  labs(title = "Cell positions — CosMx mouse brain",
+       x = "X (µm)", y = "Y (µm)")
+
+p2 <- ggplot(df, aes(x = x_um, y = y_um, color = n_genes_by_counts)) +
+  geom_point(size = 0.2) +
+  scale_color_viridis_c(name = "Genes\ndetected") +
+  coord_fixed() + theme_minimal() +
+  labs(title = "Number of genes detected per cell",
+       x = "X (µm)", y = "Y (µm)")
+
+p1 + p2
+```
+
+## Inspect the normalised expression distributions
+
+```{r inspect_distributions, fig.width=10, fig.height=4}
+par(mfrow = c(1, 2))
+
+hist(df$n_genes_by_counts,
+     breaks = 80, col = "steelblue", border = NA,
+     xlab = "Genes detected per cell", ylab = "Number of cells",
+     main = "Genes per cell (post-filtering)", las = 1)
+abline(v = median(df$n_genes_by_counts, na.rm = TRUE),
+       col = "firebrick", lty = 2, lwd = 2)
+legend("topright",
+       legend = paste("Median =", round(median(df$n_genes_by_counts, na.rm = TRUE))),
+       col = "firebrick", lty = 2, lwd = 2, bty = "n")
+
+hist(log1p(df$total_counts),
+     breaks = 80, col = "seagreen", border = NA,
+     xlab = "log(Total counts + 1)", ylab = "Number of cells",
+     main = "Total counts per cell (log scale)", las = 1)
+```
+
+---
+
+# Dimensionality reduction
+
+## PCA
+
+Because the CosMx panel is already targeted (~950 genes), we run PCA on
+**all genes** — no HVG selection is applied.
+
+> **Why scale?** Without scaling, highly expressed genes dominate the top PCs
+> simply because they have larger absolute variance. `ScaleData()` centres each
+> gene to mean 0 and scales to variance 1, ensuring every gene contributes
+> equally to PCA.
+
+```{r scale_and_pca, fig.width=10, fig.height=5}
+# Make normalised counts available to Seurat's PCA (no re-normalisation)
+obj[["RNA"]]$data <- obj[["RNA"]]$counts
+
+# Scale all genes
+GE <- ScaleData(obj, features = rownames(obj))
+cat("Scaling done:", nrow(obj), "genes scaled.\n")
+
+# Run PCA on all genes
+GE <- RunPCA(GE, features = rownames(GE), seed.use = 42)
+
+# Elbow plot: shows variance explained per PC
+# Use this to decide how many PCs to retain (look for the "elbow")
+ElbowPlot(GE, ndims = 50) +
+  ggtitle("Elbow plot — variance explained per PC") +
+  theme_minimal()
+```
+
+```{r pca_plot, fig.width=6, fig.height=5}
+DimPlot(GE, reduction = "pca", dims = c(1, 2), pt.size = 1, alpha = 0.2) +
+  ggtitle("PCA — PC1 vs PC2") + theme_minimal()
+```
+
+## UMAP
+
+UMAP is run on the top PCs (not on raw gene expression). It produces a 2D
+embedding that preserves local neighbourhood structure and is well-suited to
+visualising discrete cell populations.
+
+> **Parameters:**  
+> `dims`: number of PCs to use — should match your elbow plot choice.  
+> `n.neighbors`: size of the local neighbourhood (typical range: 15–50).  
+> `min.dist`: controls how tightly cells are packed (lower = tighter clusters).
+
+```{r run_umap, fig.width=6, fig.height=5}
+GE <- RunUMAP(GE,
+              dims        = 1:50,   # adjust based on elbow plot
+              n.neighbors = 30,
+              min.dist    = 0.3,
+              metric      = "euclidean",
+              seed.use    = 42)
+
+DimPlot(GE, reduction = "umap", pt.size = 0.3, alpha = 0.3) +
+  ggtitle("UMAP (before clustering)") + theme_minimal()
+```
+
+---
+
+# Guided analysis — tools for your assignment
+
+> The code blocks below are **ready to run**. Your task is to:  
+> (1) Choose appropriate parameter values where indicated by `# <-- CHOOSE`.  
+> (2) Interpret the outputs biologically.  
+> (3) Assemble one or two figures that together answer the assignment question.
+
+## Step 1 — Build a cell neighbourhood graph
+
+Before clustering, Seurat constructs a shared nearest-neighbour (SNN) graph:
+each cell is connected to its $k$ closest neighbours in PC space.
+
+```{r find_neighbors}
+# dims: use the same number of PCs as in RunUMAP above
+# k.param: number of neighbours — 20–30 is typical for this dataset size
+GE <- FindNeighbors(GE,
+                    dims         = 1:50,    # <-- CHOOSE (match UMAP dims)
+                    k.param      = 30,      # <-- CHOOSE (neighbours per cell)
+                    annoy.metric = "euclidean")
+cat("Neighbourhood graph built.\n")
+```
+
+## Step 2 — Identify clusters
+
+`FindClusters()` detects communities in the SNN graph. The key parameter is
+`resolution`: higher values produce more, smaller clusters.
+
+> **Which algorithm?**  
+> `algorithm = 4` (Leiden) is recommended — it avoids poorly connected
+> communities. If `leidenAlg` failed to install on your system, use
+> `algorithm = 1` (Louvain) as a fallback.
+
+```{r find_clusters}
+GE <- FindClusters(GE,
+                   resolution = 0.5,    # <-- CHOOSE (try 0.3, 0.5, 0.8, 1.0)
+                   algorithm  = 1)      # 4 = Leiden; use 1 if leidenAlg unavailable
+
+cat("Clusters found:", length(unique(GE$seurat_clusters)), "\n")
+table(GE$seurat_clusters)
+```
+
+## Step 3 — Visualise clusters in UMAP space
+
+```{r umap_clusters, fig.width=7, fig.height=6}
+DimPlot(GE,
+        reduction  = "umap",
+        group.by   = "seurat_clusters",
+        cols       = make_palette(nlevels(GE$seurat_clusters)),
+        pt.size    = 0.4,
+        alpha      = 0.5,
+        label      = TRUE,
+        label.size = 4) +
+  ggtitle("Transcriptional clusters (UMAP)") +
+  theme_minimal()
+```
+
+## Step 4 — Project clusters onto the tissue
+
+A key strength of CosMx data is the ability to map cluster assignments back onto
+the **original tissue coordinates**, revealing anatomically coherent brain
+regions (cortex, hippocampus, striatum, etc.).
+
+```{r spatial_clusters, fig.width=10, fig.height=8}
+keep       <- !is.na(GE$x_um) & !is.na(GE$y_um)
+GE_spatial <- GE[, keep]
+
+df_spatial <- data.frame(
+  x       = GE_spatial$x_um,
+  y       = GE_spatial$y_um,
+  cluster = GE_spatial$seurat_clusters
+)
+
+# All clusters together
+ggplot(df_spatial, aes(x = x, y = y, colour = cluster)) +
+  geom_point(size = 0.1, alpha = 0.7) +
+  scale_colour_manual(values = make_palette(nlevels(factor(df_spatial$cluster)))) +
+  coord_fixed() +
+  theme_minimal(base_size = 11) +
+  theme(legend.position = "right", panel.grid = element_blank()) +
+  guides(colour = guide_legend(override.aes = list(size = 3, alpha = 1))) +
+  labs(title  = "Spatial distribution of transcriptional clusters",
+       x = "X (µm)", y = "Y (µm)", colour = "Cluster")
+```
+
+```{r spatial_facet, fig.width=14, fig.height=10}
+# Individual cluster footprints — useful for identifying spatially coherent types
+ggplot(df_spatial, aes(x = x, y = y, colour = cluster)) +
+  geom_point(size = 0.15, alpha = 0.6) +
+  scale_colour_manual(values = make_palette(nlevels(factor(df_spatial$cluster)))) +
+  facet_wrap(~ cluster, ncol = 4) +
+  coord_fixed() +
+  theme_minimal(base_size = 9) +
+  theme(legend.position = "none", panel.grid = element_blank(),
+        strip.text = element_text(face = "bold")) +
+  labs(title = "Spatial footprint per cluster", x = "X (µm)", y = "Y (µm)")
+```
+
+## Step 5 — Identify marker genes per cluster
+
+To interpret clusters biologically, we identify genes that are specifically
+highly expressed in each cluster relative to all other cells.
+
+> `FindAllMarkers()` runs a one-vs-rest differential expression test.  
+> `only.pos = TRUE` returns only up-regulated genes (the most useful for
+> annotation).  
+> `min.pct` and `logfc.threshold` filter out weak signals to speed up computation.  
+> ⚠️ This step can take **5–10 minutes** on the full dataset.
+
+```{r find_markers, cache=TRUE}
+markers <- FindAllMarkers(GE,
+                          only.pos       = TRUE,
+                          min.pct        = 0.25,
+                          logfc.threshold = 0.5,
+                          test.use       = "wilcox")
+
+# Top 5 markers per cluster
+top5 <- markers %>%
+  group_by(cluster) %>%
+  slice_max(order_by = avg_log2FC, n = 5)
+
+print(top5)
+```
+
+## Step 6 — Automated cell type annotation
+
+We use the **`celldex` Mouse RNA-seq reference** to automatically assign a
+cell type label to each cell. `SingleR` computes correlations between each
+query cell and reference cell type profiles.
+
+> ⚠️ This step can take **10--20 minutes** on the full dataset.  
+> **Why not `ZeiselBrainData()`?** That function has a known incompatibility
+> with newer versions of `dbplyr` (`collect(Inf)` is no longer valid).
+> `celldex` is the recommended replacement and requires no manual
+> normalisation step.  
+> `label.main` gives coarse labels (neurons, astrocytes, oligodendrocytes,
+> endothelial cells, microglia, etc.); use `label.fine` for finer subtypes.
+
+```{r cell_type_annotation, cache=TRUE}
+# Install celldex if needed
+if (!require("celldex", quietly = TRUE))
+  BiocManager::install("celldex")
+library(celldex)
+
+# Load the mouse RNA-seq reference (downloads once, cached locally after first run)
+ref <- celldex::MouseRNAseqData()
+cat("Reference label distribution (label.main):\n")
+print(table(ref$label.main))
+
+# Convert Seurat object to SingleCellExperiment (required by SingleR)
+GE_sce <- as.SingleCellExperiment(GE)
+
+# Run SingleR: correlate each cell against reference profiles
+pred <- SingleR(
+  test      = GE_sce,
+  ref       = ref,
+  labels    = ref$label.main,   # switch to ref$label.fine for finer resolution
+  de.method = "wilcox"
+)
+
+# Transfer predicted labels back to Seurat object
+GE$SingleR_label <- factor(pred$pruned.labels)
+cat("\nAnnotation done. Label distribution:\n")
+print(table(GE$SingleR_label, useNA = "always"))
+```
+
+---
+
+# Your assignment deliverables
+
+Using the analysis above as a starting point, produce the following **in a new
+section of this R Markdown document** (add your code and text below this
+section):
+
+## Figure(s)
+
+Produce **one or two figures** that together convey a single, compelling
+biological message about the transcriptional diversity and spatial organisation
+of cells in the mouse brain.
+
+Your figure must be:
+
+- visually clear and easy to interpret
+- properly labelled (axes, colour legend, annotations)
+- designed with meaningful colour choices
+- carrying one clear message
+
+## Figure legend
+
+Write a figure legend in the style of a research article. It must be:
+
+- concise and self-contained (a reader unfamiliar with your analysis should
+  understand it from the legend alone)
+- inclusive of: data type, method used, what is shown (clusters / cell types /
+  genes), and a definition of all visual elements (colours, axes, groups)
+
+## Results paragraph
+
+Write a short results paragraph (3–4 sentences) that:
+
+1. Describes the main observation
+2. Explains its biological meaning
+3. Connects your finding to the context of the study (mouse brain cell
+   organisation)
+
+---
+
+*BIO-463 Genomics & Bioinformatics — Assignment II*

@@ -1,0 +1,260 @@
+---
+title: "BIO-463: Bulk RNA-sequencing Analysis"
+author: "Raphaëlle Luisier"
+date: "April 2025"
+output:
+  html_document:
+    theme: paper
+#paper readable
+    highlight: monochrome
+    code_folding: hide
+    toc: true
+    toc_depth: 2
+#    toc_float: true
+    number_sections: true
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(cache =TRUE)
+knitr::opts_chunk$set(fig.width=16, fig.height=10, figure.align = "center") 
+rm(list = ls())
+
+
+if (!require("BiocManager", quietly = TRUE))
+  BiocManager::install("BiocManager")
+if (!require("DESeq2", quietly = TRUE))
+  BiocManager::install("DESeq2")
+library("DESeq2")
+if (!require("ape", quietly = TRUE))
+  BiocManager::install("ape")
+library("ape")
+if (!require("limma", quietly = TRUE))
+  BiocManager::install("limma")
+library("limma")
+if (!require("geneplotter", quietly = TRUE))
+  BiocManager::install("geneplotter")
+library("geneplotter")
+if (!require("gprofiler2", quietly = TRUE))
+  BiocManager::install("gprofiler2")
+library("gprofiler2")
+if (!require("edgeR", quietly = TRUE))
+  BiocManager::install("edgeR")
+library("edgeR")
+
+```
+
+
+# Load the data {.tabset}
+The high-throughput poly(A) RNA-seq data used in this notebook are described in [Neeves et al, Brain (2022)](https://pubmed.ncbi.nlm.nih.gov/33693641/). They are derived from nuclear and cytoplasmic fractions of human induced pluripotent stem cells (hiPSC; day 0), neural precursors (NPC; day 3 and day 7), ‘patterned’ precursor motor neurons (ventral spinal cord; pMN; day 14), post-mitotic but electrophysiologically immature motor neurons (MN; day 22), and electrophysiologically active MNs (mMNs; day 35). The data required for this practical session can be downloaded from [Zenodo](https://zenodo.org/records/10944047).
+
+![Schematic depicting the iPSC differentiation strategy for motor neurogenesis. Arrows indicate sampling time-points in days when cells were fractionated into nuclear and cytoplasmic compartments prior to deep (polyA) RNA-sequencing. Four iPSC clones were obtained from four different healthy controls and three iPSC clones from two ALS patients with VCP mutations: R155C and R191Q; hereafter termed VCPmu. Induced-pluripotent stem cells (iPSC); neural precursors (NPC); “patterned” precursor motor neurons (ventral spinal cord; pMN); post-mitotic but electrophysiologically inactive motor neurons (MN); electrophysiologically active MNs (mMN).](./protocol.png)
+The gene expression count data was obtained from [Kallisto](https://pachterlab.github.io/kallisto/about) (Bray et al., 2016) using the Gencode hg38 release Homo sapiens transcriptome. 
+
+```{r load_data,warning=FALSE,fig.width=8, fig.height=4}
+load("./data_09_04_2024.RData")
+#Data: 
+# myE_ge                  : raw gene expression count matrix 
+# info                    : sample annotation (data-frame)
+# ttg                     : rows (genes) annotation
+
+# Focus on CTRL samples for this session
+sel_samples <- which(info$mutant=="CTRL")
+myE_ge      <- myE_ge[,sel_samples]
+info        <- info[sel_samples,]
+info$group  <- factor(paste(info$Fraction,info$DIV,sep="_"),levels=unique(paste(info$Fraction,info$DIV,sep="_")))
+
+
+#Make some nice colors to facilitate the visualisation of time-points
+mytime                 <- factor(as.character(info$DIV),levels=c(0,3,7,14,22,35))
+mycols_days            <- c("#CCFF00","#33CC33","#669999","#6699FF","#3300FF","#CC33CC")
+names(mycols_days)     <- c(0,3,7,14,22,35)
+mycols                 <- unlist(lapply(info$DIV,function(Z)return(mycols_days[match(as.character(Z),names(mycols_days))])))
+
+```
+
+
+# Get familiar with your data
+How many samples is there in your count data? 
+
+Does this correspond to your experimental protocol? 
+
+Check that the colnames of the data-count corresponds to your sampleID in the sample annotation file.
+
+What are the covariates?
+
+how many rows?
+
+Check that the rowID of the data-count corresponds to the ensembl gene ID in your gene annotation file.
+
+```{r overview_of_the_daya,warning=FALSE}
+#View(info)
+#nrow(info)
+#Check that the colnames of the data-count corresponds to your sampleID in the sample annotation file:
+match(colnames(myE_ge),info$sampleID)
+#Check that the colnames of the data-count corresponds to your sampleID in the sample annotation file:
+sum(is.na(match(rownames(myE_ge),ttg$ens_gene)))
+```
+
+How does your data look-like?
+```{r plot_distributio_samples,warning=FALSE,fig.width=8, fig.height=4}
+par(mfrow=c(2,3))
+plot(density(myE_ge[,1]),main="Read count distribution in sample 1")
+boxplot(myE_ge,las=1,ylab="raw gene count",main="with outliers")
+boxplot(myE_ge,outline=FALSE,las=1,ylab="raw gene count",main="without outliers")
+plot(density(t(myE_ge[1,])),main="Read count distribution across samples")
+boxplot(t(myE_ge[c(1,10,45,100,200,3000,4000),]),las=1,ylab="raw gene count",main="with outliers")
+boxplot(t(myE_ge[c(1,10,45,100,200,3000,4000),]),outline=FALSE,las=1,ylab="raw gene count",main="without outliers")
+```
+
+# Pre-processing of the count data
+## Variance stabilisation with log-transformation
+Analysis of the variance of the gene count across the $N$ samples: $\sigma^2=Var(X)=\frac{1}{n}\sum_{i=1}^{n}(x_i-\mu)^2$ and $\mu=\frac{1}{n}\sum_{i=1}^n$x_i:
+
+Let's have a close look at how the variance in gene expression scale with average and then correct it with some transformation.
+```{r variance_analysis_corrected,warning=FALSE,fig.width=8, fig.height=3,eval=TRUE}
+#calculate mean and variance of the rows
+row_avg<-apply(myE_ge,1,mean)
+row_var <-apply(myE_ge,1,var)
+
+#Log-transform your count data
+myE_gel <- log2(1+myE_ge)
+
+
+
+par(mfrow=c(1,2))
+#Variance scale with average --> Poisson distribution
+plot(row_avg,row_var,las=1,main="RAW data",pch=19,col=rgb(0,0,0,0.2),cex=0.5,xlab="mean read count",ylab="variance read count",xlim=c(0,5000),ylim=c(0,10^7))
+grid()
+
+plot(apply(myE_gel,1,mean),apply(myE_gel,1,var),las=1,main="Log2-transformed data",pch=19,col=rgb(0,0,0,0.1),cex=0.5,xlab="mean read count",ylab="variance read count")
+grid()
+
+
+
+```
+
+## Identification of reliably expressed genes
+Let's first have a look at the distribution of gene expression for a few samples:
+```{r plot_density,warning=FALSE,fig.width=8, fig.height=3}
+par(mfrow=c(1,3))
+geneplotter::multidensity(myE_gel[,c(1,2,4,10)],main="Read count distributions",las=1,xlab="read count [log2]")
+plot(density(myE_gel[,1]),las=1,main=colnames(myE_gel)[1],las=1,xlab="read count [log2]")
+plot(density(myE_gel[,3]),las=1,main=colnames(myE_gel)[3],las=1,xlab="read count [log2]")
+
+```
+
+We can identify reliably expressed genes by fitting a bimodal distribution to the log2-read count distribtution of each samples to discriminate between the foreground and the background transcription. The limit must be fitted to each individual sample given that the library size will impact this factor.
+
+
+```{r selection_threshold,echo=FALSE,eval=TRUE,fig.width=8,fig.height=3}
+# 1 Fit bimodal distribution
+bimdens              <- lapply(c(1:ncol(myE_gel)),function(IX)return(mclust::densityMclust(data=myE_gel[,IX],G=2,plot=FALSE)))
+
+# 2. Identify limit that discriminate foreground from background
+Lims                 <- unlist(lapply(bimdens,function(x)return(qnorm(0.99,mean=x$parameters$mean[1],sd=sqrt(x$parameters$variance$sigmasq[1])))))
+
+par(mfrow=c(1,2))
+boxplot(Lims,ylab="threshold selection",las=2)
+geneplotter::multidensity(myE_gel,leg=FALSE,main="Read count distributions",las=1,xlab="read count [log2]")
+abline(v=Lims)
+```
+
+
+We can now select for the reliably expressed genes in each sample:
+```{r selection_genes,echo=FALSE,eval=TRUE,fig.width=8,fig.height=3}
+# 1. Select reliably expressed genes in each sample
+is_expressed_samples            <- do.call(lapply(c(1:ncol(myE_gel)),function(IX)return(myE_gel[,IX]>Lims[IX])),what=cbind)
+no_reliably_expressed_genes_samples <- apply(is_expressed_samples,2,sum)
+
+# 2. Select reliably expressed genes in each group
+is_expressed_groups  <- t(apply(is_expressed_samples,1,function(Z)return(tapply(Z,INDEX=factor(info$group),FUN=function(W)return(sum(W)==length(W))))))
+no_reliably_expressed_genes_group <- apply(is_expressed_groups,2,sum)
+
+# 3. Select reliably expressed genes in at least one of the groups
+is_expressed_global  <- apply(is_expressed_groups,1,sum)>=1#167'69 genes are reliably expressed in at least one group
+
+# 4. Create data-table with reliably expressed genes
+myE_gelf             <- myE_gel[is_expressed_global,]
+
+temp <- matrix(no_reliably_expressed_genes_group,nrow=2,byrow=TRUE)
+rownames(temp)<-c("nuc","cyto")
+layout(matrix(c(1,2,2),ncol=3,nrow=1,byrow=TRUE))
+boxplot(no_reliably_expressed_genes_samples,las=1,ylab="# reliably expressed per sample")
+barplot(t(temp),beside=TRUE,las=1,ylab="# reliably expressed genes per group",col=mycols_days)
+legend("top",ncol=1,leg=c(0,3,7,14,22,35),col=mycols_days,bty="n",cex=0.8,pch=15)
+```
+
+## Normalisation
+Let's first look at the ditribution of the gene count across a few samples:
+```{r prio_normalisation,echo=FALSE,eval=TRUE,fig.width=8,fig.height=5}
+par(mfrow=c(1,2))
+geneplotter::multidensity(myE_gelf[,c(1,10,15)],leg=FALSE,main="Read count distributions",las=1,xlab="read count [log2]")
+boxplot(myE_gelf,outline=FALSE)
+```
+
+
+There are several options for normalisation. Scaling factors, quantile normalisation etc.
+```{r normalisation,echo=FALSE,eval=TRUE,fig.width=8,fig.height=5}
+#Quantile normalisation
+myE_gen               <- limma::normalizeQuantiles(myE_gelf)
+par(mfrow=c(2,2))
+geneplotter::multidensity(myE_gelf[,c(1,10,15)],leg=FALSE,main="Prior normalisation",las=1,xlab="read count [log2]")
+geneplotter::multidensity(myE_gen[,c(1,10,15)],leg=FALSE,main="Quantile normalised",las=1,xlab="read count [log2]")
+
+
+boxplot(myE_gelf,outline=FALSE,las=1,ylab="read count")
+boxplot(myE_gen,outline=FALSE,las=1)
+
+```
+
+What is the effect on the gene count?
+```{r normalisation_effect_gene_count,echo=FALSE,eval=TRUE,fig.width=8,fig.height=5}
+par(mfrow=c(1,2))
+boxplot(t(myE_gelf[c(1,10,40,200,5000,2000),]),las=1,outline=FALSE,main="Prior normalisation",ylab="read count [log2]")
+boxplot(t(myE_gen[c(1,10,40,200,5000,2000),]),las=1,outline=FALSE,main="Quantile normalised")
+```
+
+
+# Unsupervised hierarchical clustering analysis of the samples
+
+Hierarchical clustering of the samples is frequently used to analyse whether similar samples cluster together.
+
+Let's first compare the clustering of the samples using the Manhattan distance and Ward D algorithm:
+```{r hc_all_dist_corr_mannathan,echo=FALSE,out.width='100%',fig.height=5}
+CEX=1.0
+hcl_raw                          <- hclust(dist(t(myE_gel),method="man"), method = "ward.D", members = NULL)
+hcl_quantile                     <- hclust(dist(t(myE_gen),method="man"), method = "ward.D", members = NULL)
+
+par(mfrow=c(1,2))
+plot(ape::as.phylo(hcl_raw),tip.color=mycols,cex=CEX,label.offset = 0.001,no.margin = TRUE,use.edge.length=TRUE,direction="rightwards",plot=TRUE,font=1,main="Log2 raw count")
+plot(ape::as.phylo(hcl_quantile),tip.color=mycols,cex=CEX,label.offset = 0.001,no.margin = TRUE,use.edge.length=TRUE,direction="rightwards",plot=TRUE,font=1,main="Quantile")
+```
+
+Samples are very similarly clustered in Quantile and Deseq2 normalised methods. Let's compare the different effect of the distances used as well as agglomerative alorithm. From now we will use the quantile normalised matrix:
+
+```{r hc_all_dist_corr,echo=FALSE,out.width='100%',fig.height=5}
+CEX=1.0
+#Function to calculate the distance using the correlation 
+dist_corr <- function(mat=myE_gel,method="spearman"){return(dist(1-cor(myE_gel,method =method)))}#pearson
+
+hcl_pearson                     <- hclust(dist_corr(mat=myE_gen,method="pearson"), method = "ward.D", members = NULL)
+hcl_spearman                     <- hclust(dist_corr(mat=myE_gen,method="spearman"), method = "ward.D", members = NULL)
+hcl_euc                          <- hclust(dist(t(myE_gen),method="euc"), method = "ward.D", members = NULL)
+hcl_man                          <- hclust(dist(t(myE_gen),method="man"), method = "ward.D", members = NULL)
+
+
+par(mfrow=c(1,4))
+plot(ape::as.phylo(hcl_pearson),tip.color=mycols,cex=CEX,label.offset = 0.001,no.margin = TRUE,use.edge.length=TRUE,direction="rightwards",plot=TRUE,font=1,main="Pearson correlation")
+plot(ape::as.phylo(hcl_spearman),tip.color=mycols,cex=CEX,label.offset = 0.001,no.margin = TRUE,use.edge.length=TRUE,direction="rightwards",plot=TRUE,font=1,main="Spearman correlation")
+plot(ape::as.phylo(hcl_euc),tip.color=mycols,cex=CEX,label.offset = 0.001,no.margin = TRUE,use.edge.length=TRUE,direction="rightwards",plot=TRUE,font=1,main="Euclidean")
+plot(ape::as.phylo(hcl_man),tip.color=mycols,cex=CEX,label.offset = 0.001,no.margin = TRUE,use.edge.length=TRUE,direction="rightwards",plot=TRUE,font=1,main="Manhattan")
+```
+
+
+
+
+
+

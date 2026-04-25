@@ -1,0 +1,746 @@
+---
+title: "BIO-463: Single-cell RNA-sequencing data (I)"
+author: "Raphaëlle Luisier and Lisa Fournier, Idiap Research Institute"
+date: "April 2025"
+output:
+  html_document:
+    theme: paper
+#paper readable
+    highlight: monochrome
+    #code_folding: hide
+    toc: true
+    toc_depth: 2
+#    toc_float: true
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(cache =TRUE)
+knitr::opts_chunk$set(fig.width=16, fig.height=10, figure.align = "center") 
+rm(list = ls())
+
+
+if (!require("BiocManager", quietly = TRUE))
+  BiocManager::install("BiocManager")
+if (!require("ape", quietly = TRUE))
+  BiocManager::install("ape")
+library("ape")
+if (!require("limma", quietly = TRUE))
+  BiocManager::install("limma")
+library("limma")
+if (!require("geneplotter", quietly = TRUE))
+  BiocManager::install("geneplotter")
+library("geneplotter")
+if (!require("gprofiler2", quietly = TRUE))
+  BiocManager::install("gprofiler2")
+library("gprofiler2")
+if (!require("edgeR", quietly = TRUE))
+  BiocManager::install("edgeR")
+library("edgeR")
+if (!require("AMR", quietly = TRUE))
+  BiocManager::install("AMR")
+library("AMR")
+if (!require("Seurat", quietly = TRUE))
+  BiocManager::install("Seurat")
+library("Seurat")
+if (!require("dplyr", quietly = TRUE))
+  install.packages("dplyr")
+library("dplyr")
+if (!require("patchwork", quietly = TRUE))
+  BiocManager::install("patchwork")
+library("patchwork")
+if (!require("Matrix", quietly = TRUE))
+  BiocManager::install("h")
+library("Matrix")
+if (!require("ggplot2", quietly = TRUE))
+  BiocManager::install("ggplot2")
+library("ggplot2")
+
+
+```
+
+# Introduction to the data-set 
+In this tutorial, we will analyze single-cell RNA sequencing data from [Ho et. al, Genome Research, 2018](https://www.ncbi.nlm.nih.gov/pubmed/30061114). They are derived from 451Lu melanoma cell line in two different conditions: 1) parental (untreated) and 2) resistant (treated for 6 weeks with BRAF inhibitors and yet proliferating hence called resistant): 
+<br>
+<br>
+
+<center>![**Schematic depicting the experimental protocol.**](./lisa_data_1.png){width=50%}
+</center>
+
+<br>
+
+Importantly the differenceS between these two cell populations are 1) the exposure to treatment (none versus chronic); 2) the resistance that emerges from the treatment. Hence these two variables (treatment and resistance) are confounded by the experimental set-up. This tutorial is built on the [Seurat package](https://satijalab.org/seurat/); you can refer to their vignettes for more details about the functions.  
+
+## Load the data
+The data can be downloaded from ZENODO under https://zenodo.org/records/11032235.
+```{r load_data,warning=FALSE}
+load("./scRNA_data_melanoma.RData")
+#Data: 
+# expression_matrix       : 19386 x 8574 sparse Matrix of class "dgTMatrix" in triplet form https://www.rdocumentation.org/packages/Matrix/versions/1.6-5/topics/dgTMatrix-class
+# cell_metadata           : matrix of dimension n_cells X 2; col1=uniqueID of the cell; col2=variable ()
+# gene_metadata           : matrix of dimension n_genes X 1; simply the gene symbols of the rows of the expression matrices
+mycols <- c("#6699FF", "#CC33CC")
+```
+
+## Inspect the data
+Let's check how many genes we have quantified and across how many cells:
+```{r explore_objects_1,warning=FALSE}
+str(expression_matrix)
+print(paste("n_genes=",dim(expression_matrix)[1]))
+print(paste("n_cells=",dim(expression_matrix)[2]))
+
+```
+
+Let's look at how many cells are parental versus resistant:
+```{r explore_objects_2,warning=FALSE}
+print(table(cell_metadata[,2]))
+```
+
+## Create a Seurat object
+Let's now create a Seurat object. Please note that we do not filter out genes according to a pre-determined number of reads as we are going to automatically identify the correct number of reliable genes as previously performed in bulk gene expression.
+```{r create_Seurat_object,warning=FALSE}
+# Create the Seurat
+GE <- CreateSeuratObject(counts = expression_matrix, meta.data = as.data.frame(cell_metadata), min.cells = 5, min.features = 0)
+# Explore merged metadata
+#View(GE@meta.data)
+```
+
+
+
+# Quality control and filtering of low-quality cells
+Quality control (QC) is a critical step in single-cell RNA-seq (scRNA-seq) data analysis. Low-quality cells are removed from the analysis during the QC process to avoid misinterpretation of the data. Seurat object has two features:
+
+- **nFeature_RNA** is the number of genes detected in each cell; low nFeature_RNA for a cell indicates that it may be dead/dying or an empty droplet.
+- **nCount_RNA** is the total number of molecules (UMI) detected within a cell. Can be high yet all coming from the same molecule.
+
+High nCount_RNA and/or nFeature_RNA indicates that the a cell may in fact be a doublet (or multiplet). We can calculate two additional metrics for QC:
+
+- **number of genes detected per UMI** which gives an idea of the complexity of the dataset i.e. the more genes detected per UMI, the more complex the data.
+- **mitochondrial ratio** which gives a percentage of cell reads originating from the mitochondrial genes.
+
+
+The QC process usually involves applying **user-defined thresholds** for different metrics computed for each individual cell to filter out doublets and ‘low-quality’ cells [Luecken et al, 2019](https://pubmed.ncbi.nlm.nih.gov/31217225/). Cell filtering is performed according to several criteria that are going to be used sequentially. 
+
+- UMI counts (nCount_RNA) per cell
+- Genes (nFeature_RNA) detected per cell
+- UMIs vs. genes detected
+- Mitochondrial counts ratio
+- Complexity of the library
+
+Cells that are poor quality are likely to have low genes and UMIs per cell, as well as high mitochondrial counts ratio. Good cells will generally exhibit both higher number of genes per cell and higher numbers of UMIs. In single-cell RNA sequencing experiments, doublets are generated from two cells. They typically arise due to errors in cell sorting or capture, especially in droplet-based protocols involving thousands of cells. 
+
+
+```{r UMI_versus_genes,warning=FALSE,warning=FALSE,fig.width=8, fig.height=4}
+layout(matrix(ncol=2,nrow=1,c(1:2),byrow = TRUE))
+# Add number of genes per UMI for each cell to metadata
+GE$log10GenesPerUMI <- log10(GE$nFeature_RNA) / log10(GE$nCount_RNA)
+#another notation: GE[["log10GenesPerUMI"]]        <- log10(GE$nFeature_RNA) / log10(GE$nCount_RNA)
+# Compute percent mito ratio
+GE$mitoRatio        <- PercentageFeatureSet(object = GE, pattern = "^MT-")/100
+#another notation: GE[["mitoRatio"]]        <- PercentageFeatureSet(object = GE, pattern = "^MT-")/100
+
+
+#Create subsets to facilitate the analysis
+GE_parental         <- subset(GE, subset = treatment == "parental")
+GE_resistant        <- subset(GE, subset = treatment == "resistant")
+
+#Compare #genes versus UMI
+smoothScatter(GE_parental$nFeature_RNA,GE_parental$nCount_RNA,las=1,main="Parental",xlab="# genes",ylab="# UMI")
+smoothScatter(GE_resistant$nFeature_RNA,GE_resistant$nCount_RNA,las=1,main="Resistant",xlab="# genes",ylab="# UMI")
+```
+
+
+
+## UMI counts per cell
+The UMI counts per cell should generally be above 500, that is the low end of what we expect. If UMI counts are between 500-1000 counts, it is usable but the cells probably should have been sequenced more deeply. 
+
+```{r UMI_based_filter,warning=FALSE,fig.width=10, fig.height=3}
+layout(matrix(ncol=4,nrow=1,c(1,1,1,2),byrow = TRUE))
+myUMI<- list(GE_parental$nCount_RNA,GE_resistant$nCount_RNA)
+multidensity(myUMI,las=1,xlab="# UMI per cell",ylab="density",col=mycols,main="",leg=FALSE)
+abline(v=8000) 
+myvals=unlist(lapply(myUMI,function(Z)return(sum(Z>8000)/length(Z))))
+mp<- barplot(myvals,las=1,col=mycols,ylab="% selected cells",ylim=c(0,1))
+mtext(side=3,line=0,text=round(myvals,digit=2),cex=0.6,at=mp)
+
+
+sel_UMI<- GE$nCount_RNA>8000
+```
+
+
+## Genes detected per cell
+For high quality data, the proportional histogram should contain a single large peak that represents cells that were encapsulated. If we see a small shoulder to the right of the major peak or a bimodal distribution of the cells, that can indicate a couple of things:
+
+- It might be that there are a set of cells that failed for some reason. 
+- It could also be that there are biologically different types of cells (i.e. quiescent cell populations, less complex cells of interest), and/or one type is much smaller than the other (i.e. cells with high counts may be cells that are larger in size). 
+
+Therefore, this threshold should be assessed with other metrics included in this tutorial. [Source: hbctraining.github.io](https://hbctraining.github.io/scRNA-seq/lessons/04_SC_quality_control.html). In order to automatically identify the selection threshold, we can fit a bimodal distribution and select 99% of the foreground.
+
+
+
+```{r genes_detected_filter,warning=FALSE,fig.width=10, fig.height=3}
+
+# 1 Fit bimodal distribution
+bimdens              <- mclust::densityMclust(data=GE$nFeature_RNA,G=2,plot=FALSE)
+# 2. Identify limit that discriminate foreground from background
+lim                  <- qnorm(0.99,mean=bimdens$parameters$mean[1],sd=sqrt(bimdens$parameters$variance$sigmasq[1]))
+# Visualise those values
+layout(matrix(ncol=5,nrow=1,c(1,1,1,2,3),byrow = TRUE))
+myGenes<- list(GE_parental$nFeature_RNA,GE_resistant$nFeature_RNA)
+multidensity(myGenes,las=1,xlab="# genes per cell",ylab="density",col=mycols,main="",leg=FALSE)
+abline(v=lim) 
+myvals=unlist(lapply(myGenes,function(Z)return(sum(Z>2000)/length(Z))))
+mp<- barplot(myvals,las=1,col=mycols,ylab="% selected (F_genes) cells",ylim=c(0,1))
+mtext(side=3,line=0,text=round(myvals,digit=2),cex=0.6,at=mp)
+
+
+sel_Genes<- GE$nFeature_RNA>2000
+myvals=c(sum(sel_Genes&sel_UMI&GE$treatment=="parental")/sum(GE$treatment=="parental"),
+  sum(sel_Genes&sel_UMI&GE$treatment=="resistant")/sum(GE$treatment=="resistant"))
+mp<-barplot(myvals,las=1,col=mycols,ylab="% selected (F_genes&UMI) cells",ylim=c(0,1))
+mtext(side=3,line=0,text=round(myvals,digit=2),cex=0.6,at=mp)
+```
+
+
+## Mitochondrial genes
+This metric can identify whether there is a large amount of mitochondrial contamination from dead or dying cells. Early publications in the field established a threshold of 5% and since then, it has been used as a default in several software packages for scRNA-seq data analysis, and adopted as a standard in many scRNA-seq studies. However, the validity of using a uniform threshold across different species, single-cell technologies, tissues and cell types has not been adequately assessed [Osorio et al. (2021)](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC8599307/). Other defined poor quality samples for mitochondrial counts as cells **which surpass the 0.2 mitochondrial ratio mark**.[Source: hbctraining.github.io](https://hbctraining.github.io/scRNA-seq/lessons/04_SC_quality_control.html)
+
+
+```{r mito_genes_1,warning=FALSE,fig.width=6, fig.height=3.5}
+par(mfrow=c(1,1),mar=c(10,20,10,5))
+
+# Create a data frame with the treatment and percent.mt values
+data_mt <- data.frame(Treatment = GE@meta.data$treatment, PercentMT = GE@meta.data$mitoRatio)
+
+# Create the boxplot
+ggplot(data_mt, aes(x = Treatment, y = PercentMT, fill = Treatment)) +
+  geom_boxplot() + scale_fill_manual(values = mycols) +
+  theme_minimal() +
+  labs(title = "Boxplot of percent.mt per treatment", x = "Treatment", y = "Percent.mt")
+```
+
+
+
+We can now test what would be the optimal threshold values for each individual samples by using the IQR values (identification of outliers).
+
+```{r}
+# Compute the upper quartile and the interquartile range of the % of Mitocondrial read counts
+Q3_par  <- quantile(data_mt[which(data_mt$Treatment=='parental'),]$PercentMT, 0.75)
+IQR_par <- IQR(data_mt[which(data_mt$Treatment=='parental'),]$PercentMT)
+
+Q3_res <- quantile(data_mt[which(data_mt$Treatment=='resistant'),]$PercentMT, 0.75)
+IQR_res <- IQR(data_mt[which(data_mt$Treatment=='resistant'),]$PercentMT)
+
+# Define the upper limit for outliers
+upper_limit_par <- Q3_par + 1.5 * IQR_par
+upper_limit_res <- Q3_res + 1.5 * IQR_res
+
+```
+
+
+```{r mito_genes_2,warning=FALSE,fig.width=10, fig.height=3}
+layout(matrix(ncol=5,nrow=1,c(1,1,1,2,3),byrow = TRUE))
+myGenes<- list(GE_parental$mitoRatio,GE_resistant$mitoRatio)
+multidensity(myGenes,las=1,xlab="ratio mitochondrial genes",ylab="density",col=mycols,main="",leg=TRUE,xlim=c(0,0.1))
+abline(v=c(upper_limit_par,upper_limit_res),col=mycols,lty=2)
+myLims=c(upper_limit_par,upper_limit_res)
+myvals=unlist(lapply(c(1,2),function(IX)return(sum(myGenes[[IX]]<myLims[IX])/length(myGenes[[IX]]))))
+mp<- barplot(myvals,las=1,col=mycols,ylab="% selected (F_mito) cells",ylim=c(0,1))
+mtext(side=3,line=0,text=round(myvals,digit=2),cex=0.6,at=mp)
+
+sel_Mito<- GE$mitoRatio<myLims[1]&GE$treatment=="parental"|GE$mitoRatio<myLims[2]&GE$treatment=="resistant"
+myvals<- c(sum(sel_Genes&sel_UMI&sel_Mito&GE$treatment=="parental")/sum(GE$treatment=="parental"),
+  sum(sel_Genes&sel_UMI&sel_Mito&GE$treatment=="resistant")/sum(GE$treatment=="resistant"))
+mp<-barplot(myvals,las=1,col=mycols,ylab="% selected (F_genes&UMI&Mito) cells",ylim=c(0,1))
+mtext(side=3,line=0,text=round(myvals,digit=2),cex=0.6,at=mp)
+
+```
+
+
+
+## Complexity
+The number of genes detected per UMI gives an idea of the complexity of the data-set: the more genes detected per UMI, the more complex the data. Sometimes we can detect contamination with low complexity cell types like red blood cells via this metric. Generally, we expect the novelty score to be above 0.80.
+
+
+```{r complexity,warning=FALSE,fig.width=10, fig.height=3}
+layout(matrix(ncol=5,nrow=1,c(1,1,1,2,3),byrow = TRUE))
+myGenes<- list(GE_parental$log10GenesPerUMI,GE_resistant$log10GenesPerUMI)
+names(myGenes) <- c("parental","resistant")
+multidensity(myGenes,las=1,xlab="log10GenesperUMI",ylab="density",col=mycols,main="",xlim=c(0.6,1.0))
+abline(v=0.8) 
+myvals=unlist(lapply(myGenes,function(Z)return(sum(Z>0.08)/length(Z))))
+mp<- barplot(myvals,las=1,col=mycols,ylab="% selected (F_complexity) cells",ylim=c(0,1))
+mtext(side=3,line=0,text=round(myvals,digit=2),cex=0.6,at=mp)
+
+sel_complex<- GE$log10GenesPerUMI>0.8
+myvals     <- c(sum(sel_Genes&sel_UMI&sel_Mito&sel_complex&GE$treatment=="parental")/sum(GE$treatment=="parental"),
+  sum(sel_Genes&sel_UMI&sel_Mito&sel_complex&GE$treatment=="resistant")/sum(GE$treatment=="resistant"))
+mp         <-barplot(myvals,las=1,col=mycols,ylab="% selected (F_genes&UMI&Mito&Complex) cells",ylim=c(0,1))
+mtext(side=3,line=0,text=round(myvals,digit=2),cex=0.6,at=mp)
+
+```
+
+
+## Relation between the different metrics
+It is often the case that UMIs and genes detected are evaluated together. Below is a scatter plot showing the number of genes versus the numnber of UMIs per cell coloured by the fraction of mitochondrial reads. Mitochondrial read fractions are only high (light blue color) in particularly low count cells with few detected genes. 
+
+```{r all_metrics,warning=FALSE,warning=FALSE,fig.width=8, fig.height=4}
+layout(matrix(ncol=2,nrow=1,c(1:2),byrow = TRUE))
+GE_parental  <- subset(GE, subset = treatment == "parental")
+GE_resistant <- subset(GE, subset = treatment == "resistant")
+
+plot(GE_parental$nFeature_RNA,GE_parental$nCount_RNA,las=1,main="Parental",xlab="# genes",ylab="# UMI",pch=19,cex=0.1,col=rgb(0,0,0,0.1),frame=FALSE)
+points(GE_parental$nFeature_RNA[GE_parental$mitoRatio>0.2],GE_parental$nCount_RNA[GE_parental$mitoRatio>0.2],col="red",pch=19,cex=0.3)
+mtext(side=3,line=0,text=paste("# not passed per mito =",sum(GE_parental$mitoRatio>0.2)),cex=0.8)
+
+plot(GE_resistant$nFeature_RNA,GE_resistant$nCount_RNA,las=1,main="Resistant",xlab="# genes",ylab="# UMI",pch=19,cex=0.1,col=rgb(0,0,0,0.1),frame=FALSE)
+points(GE_resistant$nFeature_RNA[GE_resistant$mitoRatio>0.2],GE_resistant$nCount_RNA[GE_resistant$mitoRatio>0.2],col="red",pch=19,cex=0.3)
+mtext(side=3,line=0,text=paste("# not passed per mito =",sum(GE_resistant$mitoRatio>0.2)),cex=0.8)
+
+```
+
+
+
+```{r get_some_more_metrics,warning=FALSE,fig.width=8, fig.height=4}
+layout(matrix(ncol=2,nrow=1,c(1:2),byrow = TRUE))
+
+smoothScatter(GE_parental$log10GenesPerUMI,GE_parental$mitoRatio,las=1,main="Parental",xlab="genes per UMI",ylab="mitochondiral ratio",ylim=c(0,0.1))
+smoothScatter(GE_resistant$log10GenesPerUMI,GE_resistant$mitoRatio,las=1,main="Resistant",xlab="genes per UMI",ylab="mitochondiral ratio",ylim=c(0,0.1))
+```
+
+
+
+## Filtering
+Considering any of the QC metrics in isolation can lead to misinterpretation of cellular signals. For example, cells with a comparatively high fraction of mitochondrial counts may be involved in respiratory processes and may be cells that you would like to keep. Likewise, other metrics can have other biological interpretations. Thus, always consider the joint effects of these metrics when setting thresholds and set them to be as permissive as possible to avoid filtering out viable cell populations unintentionally.
+
+In summary here we are going to use the following thresholds that need to be carefully considered for each experiment/data-set:
+
+- nGene > `r lim`
+- nUMI > 500
+- mitoRatio < `r myLims[1]` for parental and `r myLims[2]` for resistant
+- log10GenesPerUMI > 0.8
+
+
+```{r distribution_all_used_metrics,warning=FALSE,fig.width=10, fig.height=5}
+layout(matrix(ncol=1,nrow=1,1,byrow = TRUE))
+VlnPlot(GE, features = c("nFeature_RNA", "nCount_RNA", "log10GenesPerUMI","mitoRatio"), ncol = 4)
+```
+
+
+The following plot shows the distribution of the metrics **prior filtering**:
+
+```{r distribution_all_used_metrics_prior_filtering,warning=FALSE,fig.width=8, fig.height=4}
+plot1 <- FeatureScatter(GE, feature1 = "nCount_RNA", feature2 = "nFeature_RNA", group.by = "treatment", cols = mycols)
+plot2 <- FeatureScatter(GE, feature1 = "nCount_RNA", feature2 = "mitoRatio", group.by = "treatment", cols = mycols)
+plot1 + plot2
+```
+
+ 
+```{r filter_all}
+print(paste("Before any filtering, we have", as.character(dim(GE)[2]), "cells."))
+print(paste(sum(GE$treatment=="parental"), "parental cells"))
+print(paste(sum(GE$treatment=="resistant"), "resistant cells"))
+
+#Cell counts
+GE <- subset(GE, subset = nFeature_RNA >= lim)
+print(paste("After removing cells with low gene counts, we end up with", as.character(dim(GE)[2]), "cells."))
+# UMIs
+GE <- subset(GE, subset = nCount_RNA>500)
+print(paste("After removing cells with low UMI, we end up with", as.character(dim(GE)[2]), "cells."))
+#Mitochondrial filter
+GE <- subset(GE, subset = (treatment == "parental" & mitoRatio > upper_limit_par), invert=T)
+print(paste("After removing cells with high MT in parental, we end up with", as.character(dim(GE)[2]), "cells."))
+GE <- subset(GE, subset = (treatment == "resistant" & mitoRatio > upper_limit_res), invert=T)
+print(paste("After removing cells with high MT in resistant, we end up with", as.character(dim(GE)[2]), "cells."))
+#Perplexity
+GE <- subset(GE, subset = log10GenesPerUMI > 0.8)
+print(paste("After removing cells with low MT complexity, we end up with", as.character(dim(GE)[2]), "cells."))
+
+print(paste("We end up with", as.character(dim(GE)[2]), "cells:"))
+print(paste(sum(GE$treatment=="parental"), "parental cells"))
+print(paste(sum(GE$treatment=="resistant"), "resistant cells."))
+```
+
+
+The following plot shows the distribution of the metrics **after filtering**:
+
+```{r distribution_all_used_metrics_after_filtering,warning=FALSE,fig.width=8, fig.height=4}
+plot1 <- FeatureScatter(GE, feature1 = "nCount_RNA", feature2 = "nFeature_RNA", group.by = "treatment", cols = mycols)
+plot2 <- FeatureScatter(GE, feature1 = "nCount_RNA", feature2 = "mitoRatio", group.by = "treatment", cols = mycols)
+plot1 + plot2
+```
+
+
+# Filter genes
+
+## Motivation
+The following figure shows the total number of genes with more than one read count per cell. As we can see, the majority of cells do not express more than 3000 genes out of the 20,000 studied.
+```{r number_genes_per_cell,warning=FALSE,fig.width=10, fig.height=5}
+layout(matrix(ncol=3,nrow=1,c(1,1,2),byrow = TRUE))
+
+count_matrix <- GE@assays$RNA@layers$counts
+# Convert the count matrix to binary (1 if a gene is expressed in a cell, 0 otherwise)
+binary_matrix <- as.matrix(count_matrix > 0)
+# Compute the number of cells expressing each gene
+cells_per_gene <- Matrix::rowSums(binary_matrix)
+# Print the result
+hist(cells_per_gene, main="Distribution of the number of cells per genes", ylab="Number of genes", xlab="Number of cells", breaks=30)
+boxplot(cells_per_gene,outline=FALSE,las=1)
+```
+
+Single-cell data have a very low sensitivity and therefore the data are very sparse with many genes with zero counts. It is common to filter out these genes, similarly to what we previously did with bulk RNA-sequencing data. Obviously genes with zero count across all cells are filtered out. Additionally many studies select genes with read count above a pre-defined threshold for example selecting genes which are expressed in 10 or more cells. However we propose an alternative based on our previous work on bulk. As performed with bulk RNA-sequencing data, where non-reliably expressed genes were filtered out in order to remove non-relevant genes that can add noise to the data, we will apply the same logic here. 
+
+## Create pseudo-bulk
+We first create pseudo-bulk RNA-seq data of dimension $g\times2$ where $g$ is the number of genes across two groups (parental and resistant).
+
+```{r create_pseudo_bulk_1,warning=FALSE,fig.width=8, fig.height=4}
+layout(matrix(ncol=3,nrow=1,c(1,2,2),byrow = TRUE))
+psbulk_parental  <- log2(rowSums(subset(GE, subset = treatment == "parental")@assays$RNA@layers$counts) + 1)
+psbulk_resistant <- log2(rowSums(subset(GE, subset = treatment == "resistant")@assays$RNA@layers$counts) + 1)
+boxplot(list(parental=psbulk_parental,resistant=psbulk_resistant),outline=FALSE,col=mycols,las=1,ylab="log2 read count")
+multidensity(list(parental=psbulk_parental,resistant=psbulk_resistant),col=mycols,las=1,xlab="log2 read count")
+```
+
+
+## Remove genes not reliably expressed at the pseudobulk level -- **assignement week 9**
+Let's now fit a bimodal distribution to each sample group to select a threshold of selection:
+
+```{r identify_limits_correction,warning=FALSE,fig.width=10, fig.height=6,eval=TRUE}
+par(mfrow=c(1,2),mar=c(10,5,10,2))
+# 1 Fit bimodal distribution
+bimden             <- mclust::densityMclust(data=psbulk_parental,G=2,plot=FALSE)
+lim_parental       <- qnorm(0.9,mean=bimden$parameters$mean[1],sd=sqrt(bimden$parameters$variance$sigmasq[1]))
+
+bimden              <- mclust::densityMclust(data=psbulk_resistant,G=2,plot=FALSE)
+lim_resistant       <- qnorm(0.9,mean=bimden$parameters$mean[1],sd=sqrt(bimden$parameters$variance$sigmasq[1]))
+
+plot1 <- hist(psbulk_parental, breaks=50, col=mycols[1], main="Pseudo-bulk expression -- parental", xlab="log2(count+1)", ylab="Number of genes")
+abline(v=lim_parental, col='red')
+plot2 <- hist(psbulk_resistant, breaks=50, col=mycols[2], main="Pseudo-bulk expression -- resistant", xlab="log2(count+1)", ylab="Number of genes")
+abline(v=lim_resistant, col='red')
+
+# Filter according to the found thresholds
+indexes_parental  <- which(psbulk_parental > lim_parental)
+indexes_resistant <- which(psbulk_resistant > lim_resistant)
+
+# We keep a gene if reliably expressed in one of the two conditions
+GE <- GE[union(indexes_parental, indexes_resistant),]
+
+psbulk_parental  <- log2(rowSums(subset(GE, subset = treatment == "parental")@assays$RNA@layers$counts) + 1)
+psbulk_resistant <- log2(rowSums(subset(GE, subset = treatment == "resistant")@assays$RNA@layers$counts) + 1)
+
+print(paste("After the filtering based on pseudo-bulk expression, we have", as.character(dim(GE)[1]), "genes."))
+```
+
+# Data normalization
+The goal of normalization is to account for observed differences in measurements between samples and/or features (e.g., genes) resulting from technical artifacts or unwanted biological effects (e.g., batch effects) rather than biological effects of interest. 
+
+Normalization of scRNA-seq data is often accomplished via methods developed for bulk RNA-seq or
+even microarray data. These methods tend to neglect prominent features of scRNA-seq data such as [Cole et al. Cell Systems, 2019](https://www.cell.com/cell-systems/pdf/S2405-4712(19)30080-8.pdf):
+
+- zero inflation, i.e., excess of zero read counts observed in some single-cell protocols 
+- transcriptome-wide nuisance effects (e.g., batch) comparable in magnitude to the biological effects of interest
+-  uneven sample quality, e.g., in terms of alignment rates and nucleotide composition
+
+Seurat proposes different normalisation methods that will be tested here and compared using the distributions of average gene expression per cell and per gene:
+
+- `LogNormalize`: feature counts for each cell are divided by the total counts for that cell and multiplied by the scale.factor. This is then natural-log transformed using `log1p`.
+- `CLR`: Applies a centered log ratio transformation
+- `RC`: Relative counts. Feature counts for each cell are divided by the total counts for that cell and multiplied by the scale.factor. No log-transformation is applied. For counts per million (CPM) set scale.factor = 1e6
+- `SCTransform`=  modeling framework for the normalization and variance stabilization of molecular count data from scRNA-seq experiments. This procedure omits the need for heuristic steps including pseudocount addition or log-transformation and improves common downstream analytical tasks such as variable gene selection, dimensional reduction, and differential expression. Please look at the full vignette [here](https://satijalab.org/seurat/articles/sctransform_vignette.html).
+
+We also propose to test with the Qantile Normalisation which has been previously proposed in protocols lacking UMI counts (Townes et al. *Genome Biology (2020)*)[https://link.springer.com/article/10.1186/s13059-020-02078-0].
+
+## Normalization
+These steps can take few minutes and therefore we stored the objects in the .RData file. However if you want to run it on new data, change `eval=TRUE`.
+```{r load_nromalised_data,warning=FALSE,eval=TRUE}
+load("./normalised_seurat_objects.RData")
+dim(GE_qn@assays$RNA@layers$data)
+#Seurat objects:
+#GE     : raw data
+#GE_log : log-normalise
+#GE_clr : CLR normalisation
+#GE_rc  : RC normalisation
+#GE_sct : SCTtransformed
+#GE_qn  : quantile normalised
+```
+
+```{r seurat_normalisation,warning=FALSE,eval=FALSE}
+# Take a few minutes to run; therefore stored in the RData object
+# To make it active simply change eval to TRUE
+GE_log <- NormalizeData(GE, normalization.method = "LogNormalize", scale.factor = 1e6)
+GE_clr <- NormalizeData(GE, normalization.method = "CLR")
+GE_rc  <- NormalizeData(GE, normalization.method = "RC")
+GE_sct <- SCTransform(GE)
+
+#There are two matrices in the Seurat object 
+# 1) GE_sct@assays$SCT/RNA@data; this is the normalised counts; and rownames(as.matrix(GE_sct@assays$SCT@data)) get the GeneSymbol
+# 2) GE_sct@assays$RNA@layers$counts however this one is not containing the rownames; this is the raw counts
+
+#Extract count matrix and normalise
+q_norm                        <- 2^limma::normalizeQuantiles(log2(1+GE@assays$RNA@layers$counts))
+q_norm                        <- Matrix(round(q_norm), sparse = TRUE) #create sparse matrix
+rownames(q_norm)              <- rownames(GE)
+colnames(q_norm)              <- colnames(GE)
+GE_qn                         <- GE
+GE_qn@assays$RNA@layers$data  <- q_norm
+
+#Save all objects
+save(list=c("GE","GE_log","GE_clr","GE_rc","GE_sct","GE_qn"),file="./normalised_seurat_objects.RData")
+```
+
+
+
+## Analysis of the normalisation effect on gene expression profiles
+We can now assess the effect of individual normalisation methods on the distribution of gene expression in each sample/cell first. As shown below, the different methods have distinct effect.
+
+```{r analysis_normalisation_norm_counts,warning=FALSE,fig.width=12, fig.height=8}
+load("./normalised_seurat_objects.RData")
+layout(matrix(ncol=3,nrow=2,c(1:6),byrow = TRUE))
+myidx   <- sample(c(1:ncol(count_matrix)),size=30)
+multidensity(log2(1+as.matrix(GE@assays$RNA@layers$counts)[,myidx]),outline=FALSE,leg=FALSE,xlab="read count [log2]",main="Not normalised",las=1)
+multidensity(as.matrix(GE_log@assays$RNA@layers$data[,myidx]),outline=FALSE,leg=FALSE,main="LogNormalize",xlab="read count [log2]",las=1)
+multidensity(as.matrix(GE_clr@assays$RNA@layers$data)[,myidx],outline=FALSE,leg=FALSE,main="CLR",xlab="read count [log2]",las=1)
+multidensity(log2(1+as.matrix(GE_rc@assays$RNA@layers$data))[,myidx],outline=FALSE,leg=FALSE,main="RC",xlab="read count [log2]",las=1)
+multidensity(as.matrix(GE_sct@assays$SCT@data)[,myidx],outline=FALSE,leg=FALSE,main="SCTransform",xlab="read count [log2]",las=1)
+multidensity(log2(1+as.matrix(GE_qn@assays$RNA@layers$data)[,myidx]),outline=FALSE,leg=FALSE,main="Quantile",xlab="read count [log2]",las=1)
+
+```
+
+```{r analysis_normalisation_norm_counts_ii,warning=FALSE,fig.width=12, fig.height=8}
+layout(matrix(ncol=3,nrow=2,c(1:6),byrow = TRUE))
+boxplot(log2(1+as.matrix(GE@assays$RNA@layers$counts)[,myidx]),outline=FALSE,leg=FALSE,ylab="read count [log2]",main="Not normalised",las=1)
+boxplot(as.matrix(GE_log@assays$RNA@layers$data[,myidx]),outline=FALSE,leg=FALSE,main="LogNormalize",ylab="read count [log2]",las=1)
+boxplot(as.matrix(GE_clr@assays$RNA@layers$data)[,myidx],outline=FALSE,leg=FALSE,main="CLR",ylab="read count [log2]",las=1)
+boxplot(log2(1+as.matrix(GE_rc@assays$RNA@layers$data))[,myidx],outline=FALSE,leg=FALSE,main="RC",ylab="read count [log2]",las=1)
+boxplot(as.matrix(GE_sct@assays$SCT@data)[,myidx],outline=FALSE,leg=FALSE,main="SCTransform",ylab="read count [log2]",las=1)
+boxplot(log2(1+as.matrix(GE_qn@assays$RNA@layers$data)[,myidx]),outline=FALSE,leg=FALSE,main="Quantile",ylab="read count [log2]",las=1)
+
+```
+
+## Analysis of the normalisation effect on average and variance of gene expression profile
+We will first investigate how the variance in gene expression across the cells varies with the average gene expression. As shown below the different methods reach very different results yet none of this exhibit the expected variance stabilisation expected.
+
+```{r avg_versus_variance_across_cells,warning=FALSE,fig.width=12, fig.height=8}
+layout(matrix(ncol=3,nrow=2,c(1:6),byrow = TRUE))
+# Calculate average gene expression per cell
+# Do not consider the zeros
+
+#Raw count in log2
+avg_GE_raw <-  apply(log2(1+as.matrix(GE@assays$RNA@layers$counts)),1,function(Z)return(mean(Z[Z>0])))
+var_GE_raw <-  apply(log2(1+as.matrix(GE@assays$RNA@layers$counts)),1,function(Z)return(var(Z[Z>0])))
+names(var_GE_raw) <- rownames(GE)
+smoothScatter(avg_GE_raw,var_GE_raw,las=1,xlab="average read count across cells [log2]",ylab="variance read count across cells [log2]",main="Raw count")
+grid() 
+
+#LogNormalize
+avg_GE_log <-  apply(as.matrix(GE_log@assays$RNA@layers$data),1,function(Z)return(mean(Z[Z>0])))
+var_GE_log <-  apply(as.matrix(GE_log@assays$RNA@layers$data),1,function(Z)return(var(Z[Z>0])))
+names(var_GE_log) <- rownames(GE_log)
+smoothScatter(avg_GE_log,var_GE_log,las=1,xlab="average read count across cells [log2]",ylab="variance read count across cells [log2]",main="Log Normalise")
+grid()
+
+#CLR
+avg_GE_clr <-  apply(as.matrix(GE_clr@assays$RNA@layers$data),1,function(Z)return(mean(Z[Z>0])))
+var_GE_clr <-  apply(as.matrix(GE_clr@assays$RNA@layers$data),1,function(Z)return(var(Z[Z>0])))
+names(var_GE_clr) <- rownames(GE_clr)
+smoothScatter(avg_GE_clr,var_GE_clr,las=1,xlab="average read count across cells [log2]",ylab="variance read count across cells [log2]",main="CLR")
+grid()
+
+#RC
+avg_GE_rc <-  apply(log2(1+as.matrix(GE_rc@assays$RNA@layers$data)),1,function(Z)return(mean(Z[Z>0])))
+var_GE_rc <-  apply(log2(1+as.matrix(GE_rc@assays$RNA@layers$data)),1,function(Z)return(var(Z[Z>0])))
+names(var_GE_rc) <- rownames(GE_rc@assays$RNA@layers$data)
+smoothScatter(avg_GE_rc,var_GE_rc,las=1,xlab="average read count across cells [log2]",ylab="variance read count across cells [log2]",main="RC")
+grid()
+
+#SCT
+avg_GE_sct <-  apply(as.matrix(GE_sct@assays$SCT@data),1,function(Z)return(mean(Z[Z>0])))
+var_GE_sct <-  apply(as.matrix(GE_sct@assays$SCT@data),1,function(Z)return(var(Z[Z>0])))
+names(var_GE_sct) <- rownames(GE_sct)
+smoothScatter(avg_GE_sct,var_GE_sct,las=1,xlab="average read count across cells [log2]",ylab="variance read count across cells [log2]",main="SCT")
+grid()
+
+
+# Quantile Normalised
+avg_GE_ql <-  apply(log2(1+as.matrix(GE_qn@assays$RNA@layers$data)),1,function(Z)return(mean(Z[Z>0])))
+var_GE_ql <-  apply(log2(1+as.matrix(GE_qn@assays$RNA@layers$data)),1,function(Z)return(var(Z[Z>0])))
+names(var_GE_ql) <- rownames(GE_qn)
+smoothScatter(avg_GE_ql,var_GE_ql,las=1,xlab="average read count across cells [log2]",ylab="variance read count across cells [log2]",main="Quantile")
+grid()  
+
+```
+
+## Analysis of the normalisation effect on the average cell expression profiles
+We can as well calculate the average cell expression profile in order to compare between treatment and control cells.
+```{r avg_cells,warning=FALSE,fig.width=12, fig.height=8}
+
+#Raw count in log2
+avg_CE_raw <-  apply(log2(1+as.matrix(GE@assays$RNA@layers$counts)),2,function(Z)return(mean(Z[Z>0])))
+#LogNormalize
+avg_CE_log <-  apply(as.matrix(GE_log@assays$RNA@layers$data),2,function(Z)return(mean(Z[Z>0])))
+#An alternative way to do this is the following:
+#avg_CE_logp <-  tapply(GE_log@assays$RNA@layers$data@x,col(GE_log@assays$RNA@layers$data)[(!GE_log@assays$RNA@layers$data==0)@x],mean)
+#CLR
+avg_CE_clr <-  apply(as.matrix(GE_clr@assays$RNA@layers$data),2,function(Z)return(mean(Z[Z>0])))
+#RC
+avg_CE_rc <-  apply(log2(1+as.matrix(GE_rc@assays$RNA@layers$data)),2,function(Z)return(mean(Z[Z>0])))
+#SCT
+avg_CE_sct <-  apply(as.matrix(GE_sct@assays$SCT@data),2,function(Z)return(mean(Z[Z>0],na.rm=TRUE)))
+# Quantile Normalised
+avg_CE_ql <-  apply(log2(1+as.matrix(GE_qn@assays$RNA@layers$data)),2,function(Z)return(mean(Z[Z>0])))
+
+# Create a list of average gene expressions
+avg_GEs <- list("Raw"=avg_CE_raw,"LogNormalize" = avg_CE_log, "CLR" = avg_CE_clr, "RC" = avg_CE_rc,  "SCTransform" = avg_CE_sct,"Quantile"=avg_CE_ql)
+layout(matrix(ncol=3,nrow=2,c(1:6),byrow = TRUE))
+for(i in 1:length(avg_GEs)) {
+  multidensity(list(parental=avg_GEs[[i]][which(GE$treatment == "parental")],
+                    resistant=avg_GEs[[i]][which(GE$treatment == "resistant")]),
+               col=mycols,las=1,main=names(avg_GEs[i]),, xlab="Average Gene Expression")
+}
+```
+```{r compare_methods_heatmaps,warning=FALSE,fig.width=4, fig.height=4}
+#adapted from: http://www.sthda.com/english/wiki/ggplot2-quick-correlation-matrix-heatmap-r-software-and-data-visualization
+library(reshape2)
+
+cormat <- round(cor(do.call(what=cbind,args=avg_GEs),method="pearson"),2)
+melted_cormat <- melt(cormat)
+# Get lower triangle of the correlation matrix
+get_lower_tri<-function(cormat){
+    cormat[upper.tri(cormat)] <- NA
+    return(cormat)
+}
+  # Get upper triangle of the correlation matrix
+get_upper_tri <- function(cormat){
+    cormat[lower.tri(cormat)]<- NA
+    return(cormat)
+}
+upper_tri <- get_upper_tri(cormat)
+melted_cormat <- melt(upper_tri, na.rm = TRUE)
+#Reorder the correlation matrix
+reorder_cormat <- function(cormat){
+# Use correlation between variables as distance
+dd <- as.dist((1-cormat)/2)
+hc <- hclust(dd)
+cormat <-cormat[hc$order, hc$order]
+}
+cormat <- reorder_cormat(cormat)
+upper_tri <- get_upper_tri(cormat)
+# Melt the correlation matrix
+melted_cormat <- melt(upper_tri, na.rm = TRUE)
+# Create a ggheatmap
+ggheatmap <- ggplot(melted_cormat, aes(Var2, Var1, fill = value))+
+ geom_tile(color = "white")+
+ scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+   midpoint = 0, limit = c(-1,1), space = "Lab", 
+    name="Pearson\nCorrelation") +
+  theme_minimal()+ # minimal theme
+ theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+    size = 12, hjust = 1))+
+ coord_fixed()
+# Print the heatmap
+ggheatmap
+#print(ggheatmap)
+  
+```
+# Dimensionality reduction
+
+## Identification of highly variable genes (feature selection)
+Here we choose to keep 10'000 genes, because we don't want to loose to much biological information.
+```{r plot_most_variables_log,warning=FALSE,eval=TRUE,warning=FALSE,fig.width=12, fig.height=4}
+layout(matrix(ncol=2,nrow=1,c(1:2),byrow = TRUE))
+
+#Identify top 10'000 genes
+GE_log <- FindVariableFeatures(GE_log, selection.method = "vst", nfeatures = 10000)
+#GE_clr <- FindVariableFeatures(GE_clr, selection.method = "vst", nfeatures = 10000)
+#GE_rc  <- FindVariableFeatures(GE_rc, selection.method = "vst", nfeatures = 10000)
+#GE_sct <- FindVariableFeatures(GE_sct, selection.method = "vst", nfeatures = 10000)
+#GE_qn  <- FindVariableFeatures(GE_qn, selection.method = "vst", nfeatures = 10000)
+
+
+# Identify the 10 most highly variable genes
+top10_log     <- head(VariableFeatures(GE_log), 10)
+#top10_clr     <- head(VariableFeatures(GE_clr), 10)
+#top10_rc      <- head(VariableFeatures(GE_rc), 10)
+#top10_sct     <- head(VariableFeatures(GE_sct), 10)
+
+
+# Plot variable features with and without labels
+plot1 <- VariableFeaturePlot(GE_log)
+plot2 <- LabelPoints(plot = plot1, points = top10_log, repel = TRUE)
+plot1 + plot2
+
+```
+
+
+## Dimensionality reduction
+Prior to unsupervised clustering, dimensionality reduction is often applied on the most informative genes/features. As performed in week 9, we can use different methods for this task.
+
+## Identification of highly variable genes (feature selection)
+Selection of top 1000 variable genes.
+```{r most_variables_log,warning=FALSE,eval=TRUE,warning=FALSE,fig.width=12, fig.height=4}
+layout(matrix(ncol=2,nrow=1,c(1:2),byrow = TRUE))
+#Identify top 10'000 genes
+GE_log <- FindVariableFeatures(GE_log, selection.method = "vst", nfeatures = 10000)
+```
+
+
+## PCA, t-SNE and UMAP
+Prior performing the PCA we first need to scale and center the genes.
+```{r reduction_dim, warning=FALSE,eval=TRUE,warning=FALSE,fig.width=10, fig.height=8}
+layout(matrix(ncol=3,nrow=2,c(1:6),byrow = TRUE))
+# Scale and Center gene features
+GE_log    <- ScaleData(GE_log, features =rownames(GE_log))
+#Run PCA
+GE_log    <- RunPCA(GE_log, features = VariableFeatures(object = GE_log))
+#Run t-SNE
+GE_log    <- RunTSNE(GE_log, dims = 1:10,perplexity=10)
+#Run UMAP
+GE_log    <- RunUMAP(GE_log, dims = 1:10,n.neighbors=5,min.dist=0.4,metric="man")
+```
+
+
+PCA plot:
+```{r PCA_plot_Log, warning=FALSE,eval=TRUE,warning=FALSE,fig.width=5, fig.height=3}
+pt<-DimPlot(GE_log, reduction = "pca", group.by = "treatment", pt.size=1, cols = mycols,dims = c(1, 2),alpha=0.2) +ggtitle("PCA")
+pt
+```
+
+t-SNE plot:
+```{r tSNE_plot_Log, warning=FALSE,eval=TRUE,warning=FALSE,fig.width=5, fig.height=3}
+pt<-DimPlot(GE_log, reduction = "tsne", group.by = "treatment", pt.size=1, cols = mycols,dims = c(1, 2),alpha=0.2) +ggtitle("t-SNE")
+pt
+```
+
+
+```{r UMAP_plot, warning=FALSE,eval=TRUE,warning=FALSE,fig.width=10, fig.height=8,eval=FALSE}
+
+pt<-DimPlot(GE_log, reduction = "umap", group.by = "treatment", pt.size=1, cols = mycols,alpha=0.2)+ggtitle("UMAP")
+pt
+```
+
+
+Let's have a look at the PCA loading for the first 6 PCs in two different methods:
+```{r loading, warning=FALSE,eval=TRUE,warning=FALSE,fig.width=10, fig.height=8}
+layout(matrix(ncol=3,nrow=2,c(1:6),byrow = TRUE))
+
+# Assuming that 'seurat_object' is your Seurat object and 'treatment' is your metadata column for treatments
+pca_data <- data.frame(GE_log@reductions$pca@cell.embeddings[,1:6],
+                       Treatment = GE_log@meta.data$treatment) # Treatment labels
+
+for (i in 1:6){
+  boxplot(list(parental=pca_data[pca_data["Treatment"] == "parental", ][,i],resistant=pca_data[pca_data["Treatment"] == "resistant", ][,i]),col=mycols,las=1,ylab=paste("PC", as.character(i)),main=paste("PC", as.character(i)), outline=FALSE)
+}
+
+```
+
+The following heatmaps show the PCA loading for the most positively and negatively contributing genes in individual cells. The idea is that as long as we’re seeing clear structure in one of these plots then we’re still adding potentially useful information to the analysis. Both cells and genes are sorted by their principal component scores. It allows for easy exploration of the primary sources of heterogeneity in a dataset, and can be useful when trying to decide which PCs to include for further downstream analyses. Both cells and features are ordered according to their PCA scores. Setting cells to a number plots the ‘extreme’ cells on both ends of the spectrum.
+
+### LogNorm
+```{r loadings_logNorm, warning=FALSE,eval=TRUE,warning=FALSE,fig.width=10, fig.height=8}
+DimHeatmap(GE_log, dims = 1:6, cells = 500, balanced = TRUE,nfeatures = 30)
+```
+
+
