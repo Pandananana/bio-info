@@ -1,7 +1,16 @@
 # Assignment 2 — TODO
 
-Tasks are grouped into chunks, ordered by implementation order. Each group is a self-contained unit of work.
-The file to work on is @Assignment.Rmd
+This todo list includes multiple tasks and their subtasks.
+
+The file to work on is @Assignment.Rmd. Please work in this file, for example when you are showing your work, you shouldn't create unique scripts, it should be shown in the assignment, and compiled/rendered using Quarto to html.
+
+> **Note on heavy chunks while iterating:** The two slowest chunks —
+> `find_markers` (`FindAllMarkers`, ~5–10 min) and `cell_type_annotation`
+> (`SingleR`, ~10–20 min) — are currently set to `eval=FALSE` so renders stay
+> fast during iteration. When you reach **task 4** (markers) and **task 5**
+> (SingleR), remove the `eval=FALSE` from those chunk headers in
+> `Assignment.Rmd` so they actually execute. Their `cache=TRUE` flag means each
+> only runs slowly once; subsequent renders reuse the cached results.
 
 ---
 

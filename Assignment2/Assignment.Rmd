@@ -410,7 +410,7 @@ highly expressed in each cluster relative to all other cells.
 > `min.pct` and `logfc.threshold` filter out weak signals to speed up computation.  
 > ⚠️ This step can take **5–10 minutes** on the full dataset.
 
-```{r find_markers, cache=TRUE}
+```{r find_markers, cache=TRUE, eval=FALSE}
 markers <- FindAllMarkers(GE,
                           only.pos       = TRUE,
                           min.pct        = 0.25,
@@ -439,7 +439,7 @@ query cell and reference cell type profiles.
 > `label.main` gives coarse labels (neurons, astrocytes, oligodendrocytes,
 > endothelial cells, microglia, etc.); use `label.fine` for finer subtypes.
 
-```{r cell_type_annotation, cache=TRUE}
+```{r cell_type_annotation, cache=TRUE, eval=FALSE}
 # Install celldex if needed
 if (!require("celldex", quietly = TRUE))
   BiocManager::install("celldex")
