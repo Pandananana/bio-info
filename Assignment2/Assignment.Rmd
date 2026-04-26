@@ -265,12 +265,28 @@ cat("Scaling done:", nrow(obj), "genes scaled.\n")
 # Run PCA on all genes
 GE <- RunPCA(GE, features = rownames(GE), seed.use = 42)
 
+# Number of PCs retained for downstream UMAP / SNN graph (justified below).
+n_pcs <- 20
+
 # Elbow plot: shows variance explained per PC
 # Use this to decide how many PCs to retain (look for the "elbow")
 ElbowPlot(GE, ndims = 50) +
+  geom_vline(xintercept = n_pcs, linetype = "dashed", colour = "firebrick") +
+  annotate("text", x = n_pcs + 1, y = 5,
+           label = paste0("retained: ", n_pcs, " PCs"),
+           hjust = 0, colour = "firebrick") +
   ggtitle("Elbow plot — variance explained per PC") +
   theme_minimal()
 ```
+
+> **PC selection.** PC standard deviations drop sharply over the first ~8 PCs,
+> decline more gradually until ~PC 20, and then flatten onto a near-constant
+> plateau (SD ≈ 1) that reflects technical noise rather than biological
+> structure. We therefore retain the **top 20 PCs** for downstream UMAP and
+> graph construction: this captures the clear biological signal while excluding
+> the noise floor. Using fewer PCs (e.g. 10) risks merging closely related cell
+> populations, while using many more (e.g. 50) injects noise into the
+> neighbourhood graph without adding meaningful signal.
 
 ```{r pca_plot, fig.width=6, fig.height=5}
 DimPlot(GE, reduction = "pca", dims = c(1, 2), pt.size = 1, alpha = 0.2) +

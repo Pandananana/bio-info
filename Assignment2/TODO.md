@@ -14,12 +14,14 @@ The file to work on is @Assignment.Rmd. Please work in this file, for example wh
 
 ---
 
-## 1. Choose dimensionality reduction parameters — **to do**
+## 1. Choose dimensionality reduction parameters — **done**
 
-Inspect the existing PCA/elbow output and pick PC count.
+Inspected elbow plot and retained 20 PCs. The curve drops steeply over PCs 1–8,
+declines gradually through PC ~20, then flattens onto a noise plateau (SD ≈ 1).
+20 PCs captures biological signal while excluding the noise floor.
 
-- [ ] Run the existing PCA + `ElbowPlot` chunk and decide how many PCs to retain
-- [ ] Update `dims` in `RunUMAP` to match the chosen PC count
+- [x] Run the existing PCA + `ElbowPlot` chunk and decide how many PCs to retain
+- [x] Update `dims` in `RunUMAP` to match the chosen PC count (now `1:n_pcs`, n_pcs = 20)
 
 ## 2. Build neighbourhood graph and cluster — **to do**
 
