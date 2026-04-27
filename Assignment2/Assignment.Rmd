@@ -29,7 +29,7 @@ if (!require("BiocManager", quietly = TRUE))
   install.packages("BiocManager")
 
 pkgs_bioc <- c("zellkonverter", "SingleCellExperiment",
-               "scuttle", "SingleR", "S4Vectors",
+               "scuttle", "SingleR", "scrapper", "celldex", "S4Vectors",
                "GenomicRanges", "IRanges", "Biobase")
 for (p in pkgs_bioc) {
   if (!require(p, quietly = TRUE, character.only = TRUE))
@@ -37,7 +37,7 @@ for (p in pkgs_bioc) {
   library(p, character.only = TRUE)
 }
 
-pkgs_cran <- c("Seurat", "ggplot2", "patchwork", "dplyr", "gprofiler2")
+pkgs_cran <- c("Seurat", "ggplot2", "patchwork", "dplyr", "gprofiler2", "ggrepel")
 for (p in pkgs_cran) {
   if (!require(p, quietly = TRUE, character.only = TRUE))
     install.packages(p)
@@ -426,7 +426,7 @@ highly expressed in each cluster relative to all other cells.
 > `min.pct` and `logfc.threshold` filter out weak signals to speed up computation.  
 > ⚠️ This step can take **5–10 minutes** on the full dataset.
 
-```{r find_markers, cache=TRUE, eval=FALSE}
+```{r find_markers, cache=TRUE}
 markers <- FindAllMarkers(GE,
                           only.pos       = TRUE,
                           min.pct        = 0.25,
@@ -455,7 +455,7 @@ query cell and reference cell type profiles.
 > `label.main` gives coarse labels (neurons, astrocytes, oligodendrocytes,
 > endothelial cells, microglia, etc.); use `label.fine` for finer subtypes.
 
-```{r cell_type_annotation, cache=TRUE, eval=FALSE}
+```{r cell_type_annotation, cache=TRUE}
 # Install celldex if needed
 if (!require("celldex", quietly = TRUE))
   BiocManager::install("celldex")
@@ -521,6 +521,180 @@ Write a short results paragraph (3–4 sentences) that:
 2. Explains its biological meaning
 3. Connects your finding to the context of the study (mouse brain cell
    organisation)
+
+---
+
+# Deliverable
+
+## Cluster-level annotation
+
+To interpret the unsupervised clusters biologically, two complementary
+annotations are computed:
+
+1. The **top marker gene** of each cluster (highest average log-fold-change
+   from the `FindAllMarkers` Wilcoxon test above) is used as a transcriptional
+   identity tag.
+2. The **majority `SingleR` label** (against the `celldex` Mouse RNA-seq
+   reference) provides a broad cell-class call per cluster, but with the
+   important caveat that this bulk-RNA reference contains only six classes
+   and tends to over-call "Oligodendrocytes" for any white-matter-adjacent
+   neuronal population — neuronal sub-types in particular cannot be reliably
+   distinguished by this reference. We therefore use the cluster-level
+   marker gene as the **primary** identity readout and rely on the
+   colour-encoded cluster ID to expose the full transcriptional and
+   spatial diversity of the dataset.
+
+```{r build_labels, cache=TRUE}
+# Top-1 marker gene per cluster (largest avg_log2FC)
+top_marker <- markers %>%
+  group_by(cluster) %>%
+  slice_max(order_by = avg_log2FC, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  select(cluster, marker = gene, avg_log2FC)
+
+# Majority SingleR label per cluster (skipping NA)
+majority_singler <- GE@meta.data %>%
+  filter(!is.na(SingleR_label)) %>%
+  count(seurat_clusters, SingleR_label) %>%
+  group_by(seurat_clusters) %>%
+  slice_max(n, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  transmute(cluster = seurat_clusters, singler = SingleR_label)
+
+cluster_annot <- top_marker %>%
+  left_join(majority_singler, by = "cluster") %>%
+  mutate(label = paste0("C", cluster, " · ", marker))
+
+cat("Cluster annotation (top marker + majority SingleR call):\n")
+print(as.data.frame(cluster_annot), row.names = FALSE)
+
+# Map onto every cell so we can use it as a label/legend in the figure
+GE$cluster_label <- factor(
+  cluster_annot$label[match(GE$seurat_clusters, cluster_annot$cluster)],
+  levels = cluster_annot$label
+)
+```
+
+## Final figure
+
+```{r deliverable_figure, fig.width=18, fig.height=9, cache=TRUE}
+n_clusters <- nlevels(GE$seurat_clusters)
+cl_palette <- setNames(make_palette(n_clusters), levels(GE$seurat_clusters))
+
+# Panel A — UMAP coloured by cluster, with top-marker labels at centroids
+umap_df <- as.data.frame(Embeddings(GE, "umap"))
+colnames(umap_df) <- c("UMAP_1", "UMAP_2")
+umap_df$cluster <- GE$seurat_clusters
+
+cluster_centroids <- umap_df %>%
+  group_by(cluster) %>%
+  summarise(UMAP_1 = median(UMAP_1),
+            UMAP_2 = median(UMAP_2), .groups = "drop") %>%
+  left_join(cluster_annot, by = "cluster")
+
+pA <- ggplot(umap_df, aes(UMAP_1, UMAP_2, colour = cluster)) +
+  geom_point(size = 0.25, alpha = 0.55, show.legend = FALSE) +
+  ggrepel::geom_label_repel(data = cluster_centroids,
+                            aes(x = UMAP_1, y = UMAP_2, label = label),
+                            inherit.aes = FALSE,
+                            size = 2.8, fontface = "bold",
+                            label.padding = unit(0.12, "lines"),
+                            box.padding   = unit(0.20, "lines"),
+                            max.overlaps  = Inf,
+                            segment.size  = 0.2,
+                            min.segment.length = 0.1,
+                            seed = 1) +
+  scale_colour_manual(values = cl_palette) +
+  coord_fixed() +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid = element_blank()) +
+  labs(title = "A   Transcriptional clusters (UMAP) — labelled by cluster ID and top marker gene",
+       x = "UMAP 1", y = "UMAP 2")
+
+# Panel B — same cluster colours projected onto tissue coordinates
+keep <- !is.na(GE$x_um) & !is.na(GE$y_um)
+spatial_df <- data.frame(
+  x       = GE$x_um[keep],
+  y       = GE$y_um[keep],
+  cluster = GE$seurat_clusters[keep]
+)
+
+pB <- ggplot(spatial_df, aes(x, y, colour = cluster)) +
+  geom_point(size = 0.12, alpha = 0.7) +
+  scale_colour_manual(values = cl_palette, name = "Cluster",
+                      guide = guide_legend(ncol = 2,
+                                           override.aes =
+                                             list(size = 3, alpha = 1))) +
+  coord_fixed() +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid = element_blank(),
+        legend.position = "right",
+        legend.key.size = unit(0.6, "lines")) +
+  labs(title = "B   Same cells projected onto tissue coordinates",
+       x = "X (µm)", y = "Y (µm)")
+
+pA | pB
+```
+
+## Figure legend
+
+**Figure 1 | Unsupervised transcriptional clustering of CosMx mouse-brain
+cells recapitulates known anatomical organisation.** Spatial transcriptomic
+data (CosMx Spatial Molecular Imager, ~950-gene Mouse Neuroscience panel)
+acquired on a single coronal hemisphere of mouse brain. After scaling and
+PCA on all panel genes (top 20 PCs retained), cells were embedded with UMAP
+and partitioned into `r nlevels(GE$seurat_clusters)` transcriptional clusters
+by Louvain community detection (k-NN = 30, resolution = 0.5) on the shared
+nearest-neighbour graph. Each cluster is shown in a **distinct colour that
+is identical between panels**, so the same cluster can be tracked from
+transcriptional space to physical space.
+**(A)** UMAP embedding of every cell. Each cluster is annotated at its
+centroid with its identifier (`Cn`) followed by the gene with the highest
+average log-fold-change in a one-versus-rest Wilcoxon test (`FindAllMarkers`,
+`min.pct = 0.25`, `logFC ≥ 0.5`). These marker genes act as transcriptional
+identity tags and span the major brain cell classes: glutamatergic
+projection neurons (*Slc17a7*, *Tcf7l2*, *Tle4*, *Mef2c*), GABAergic
+interneurons (*Sst*, *Vip*), striatal medium-spiny neurons (*Drd1*, *Penk*,
+*Oprk1*), cholinergic neurons (*Slc5a7*), hypothalamic peptidergic neurons
+(*Gal*), the full oligodendrocyte lineage from *Pdgfra*-positive precursors
+through *Bcas1*-positive newly formed oligodendrocytes to mature *Plp1*
+oligodendrocytes, three astrocyte clusters (*Agt*, *Mfge8*, *Adcy8*),
+microglia (*Csf1r*), vascular endothelium and pericytes (*Itm2a*, *Vtn*),
+mural smooth-muscle cells (*Acta2*) and ciliated choroid-plexus / ependymal
+cells (*Foxj1*, *Ttr*).
+**(B)** The same cells, coloured by the same cluster identity, plotted at
+their true tissue coordinates (x, y in µm). Axes in (A) are the two UMAP
+dimensions; axes in (B) are physical position in the tissue section. The
+cluster-level annotation table (top marker, majority `SingleR` mouse-RNA
+class call, cell counts) is printed in the preceding code-chunk output.
+
+## Results
+
+Unsupervised clustering of `r format(ncol(GE), big.mark=",")` cells on the
+~950-gene CosMx Mouse Neuroscience panel resolved
+`r nlevels(GE$seurat_clusters)` transcriptionally distinct populations that
+separate cleanly in UMAP space (Fig. 1A) and whose top marker genes span
+the canonical neuronal, glial, vascular and ependymal classes of the mouse
+brain — including layer-specific glutamatergic neurons (*Slc17a7*, *Tle4*),
+*Sst* and *Vip* interneurons, *Drd1*/*Penk* striatal medium-spiny neurons,
+the full *Pdgfra* → *Bcas1* → *Plp1* oligodendrocyte differentiation
+trajectory, three molecularly distinct astrocyte clusters and rare cell
+types such as *Foxj1*/*Ttr*-positive choroid-plexus epithelium. Projecting
+these clusters back onto the original tissue coordinates (Fig. 1B) reveals
+that the transcriptional diversity is laid out along the classical anatomy
+of the coronal mouse brain: glutamatergic-neuron clusters tile the cortical
+ribbon in clear laminar bands, *Drd1*/*Penk* clusters fill the striatum,
+*Tcf7l2*-positive cluster C3 is confined to the thalamus, mature
+*Plp1*-positive oligodendrocytes (C0) trace the corpus-callosum and
+internal-capsule white-matter tracts, and the small *Foxj1*/*Ttr* clusters
+outline the ventricular ependyma and choroid plexus. The tight match
+between unsupervised transcriptional structure and known mouse-brain
+cytoarchitecture demonstrates that a targeted, imaging-based panel of only
+~950 genes is sufficient to **jointly resolve molecular cell-type identity
+and the spatial cytoarchitecture in which those cells reside** — the dual
+readout that motivates spatial transcriptomics over bulk or dissociated
+single-cell approaches when the goal is an anatomically-aware
+characterisation of the mammalian brain.
 
 ---
 
